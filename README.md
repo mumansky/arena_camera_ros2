@@ -53,7 +53,8 @@ Arena Camera deriver for ROS2 - forked and updated by Mark Umansky
           - supported pixelformats are "rgb8", "rgba8", "rgb16", "rgba16", "bgr8", "bgra8", "bgr16", "bgra16",
                                        "mono8", "mono16", "bayer_rggb8", "bayer_bggr8", "bayer_gbrg8",
                                        "bayer_grbg8", "bayer_rggb16", "bayer_bggr16", "bayer_gbrg16", "bayer_grbg16", 
-                                       "yuv422"
+                                       "yuv422", "polarized_angles_0d_45d_90d_135d_bayer_rg8"
+          - the "polarized_angles_0d_45d_90d_135d_bayer_rg8" format is for polarization cameras like PHX050S1-QC
         - gain
           - a double value represents the gain of the image.
 
@@ -128,6 +129,19 @@ Arena Camera deriver for ROS2 - forked and updated by Mark Umansky
       `ros2 run arena_camera_node start --ros-args -p exposure_time:=<proper value> -p trigger_mode=true`
     - To trigger an image run 
       `ros2 run arena_camera_node trigger_image`
+
+# Logging Verbosity
+The node uses standard ROS2 logging levels. By default, per-image publish messages are logged at DEBUG level to reduce console noise.
+
+To enable verbose debug logging, set the log level when starting the node:
+
+    `ros2 run arena_camera_node start --ros-args --log-level debug`
+
+Or for even more detail:
+
+    `ros2 run arena_camera_node start --ros-args --log-level arena_camera_node:=debug`
+
+Available log levels (from most to least verbose): DEBUG, INFO, WARN, ERROR, FATAL
 
 # Road map
 - support windows

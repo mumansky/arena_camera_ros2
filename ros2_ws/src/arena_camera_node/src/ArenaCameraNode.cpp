@@ -256,7 +256,7 @@ void ArenaCameraNode::publish_images_()
       m_pub_->publish(std::move(p_image_msg));
       m_images_published_++;
 
-      log_info(std::string("image ") + std::to_string(pImage->GetFrameId()) +
+      log_debug(std::string("image ") + std::to_string(pImage->GetFrameId()) +
                " published to " + topic_);
       this->m_pDevice->RequeueBuffer(pImage);
 
@@ -352,7 +352,7 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     response->success = false;
   }
 
-  log_info("A client triggered an image request");
+  log_debug("A client triggered an image request");
 
   Arena::IImage* pImage = nullptr;
   try {
@@ -365,7 +365,7 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
           Arena::GetNodeValue<bool>(m_pDevice->GetNodeMap(), "TriggerArmed");
 
       if (triggerArmed == false && (waitForTriggerCount % 10) == 0) {
-        log_info("waiting for trigger to be armed");
+        log_debug("waiting for trigger to be armed");
       }
 
     } while (triggerArmed == false);
@@ -386,7 +386,7 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     response->message = msg;
     response->success = true;
 
-    log_info(msg);
+    log_debug(msg);
     this->m_pDevice->RequeueBuffer(pImage);
 
   }
