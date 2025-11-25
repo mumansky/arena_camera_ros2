@@ -453,8 +453,14 @@ void ArenaCameraNode::set_nodes_()
   set_nodes_exposure_();
   set_nodes_trigger_mode_();
   // configure Auto Negotiate Packet Size and Packet Resend
-  Arena::SetNodeValue<bool>(m_pDevice->GetTLStreamNodeMap(), "StreamAutoNegotiatePacketSize", true);
-  Arena::SetNodeValue<bool>(m_pDevice->GetTLStreamNodeMap(), "StreamPacketResendEnable", true);
+  try {
+    Arena::SetNodeValue<bool>(m_pDevice->GetTLStreamNodeMap(), "StreamAutoNegotiatePacketSize", true);
+    Arena::SetNodeValue<bool>(m_pDevice->GetTLStreamNodeMap(), "StreamPacketResendEnable", true);
+  } catch (GenICam::GenericException& e) {
+    log_warn(std::string("\tStream configuration warning: ") + e.what());
+  } catch (std::exception& e) {
+    log_warn(std::string("\tStream configuration warning: ") + e.what());
+  }
 
   //set_nodes_test_pattern_image_();
 }
@@ -553,37 +559,43 @@ void ArenaCameraNode::set_nodes_exposure_()
 void ArenaCameraNode::set_nodes_trigger_mode_()
 {
   auto nodemap = m_pDevice->GetNodeMap();
-  if (trigger_mode_activated_) {
-    if (exposure_time_ < 0) {
-      log_warn(
-          "\tavoid long waits wating for triggered images by providing proper "
-          "exposure_time.");
+  try {
+    if (trigger_mode_activated_) {
+      if (exposure_time_ < 0) {
+        log_warn(
+            "\tavoid long waits wating for triggered images by providing proper "
+            "exposure_time.");
+      }
+      // Enable trigger mode before setting the source and selector
+      // and before starting the stream. Trigger mode cannot be turned
+      // on and off while the device is streaming.
+
+      // Make sure Trigger Mode set to 'Off' after finishing this example
+      Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode", "On");
+
+      // Set the trigger source to software in order to trigger buffers
+      // without the use of any additional hardware.
+      // Lines of the GPIO can also be used to trigger.
+      Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerSource",
+                                             "Software");
+      Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerSelector",
+                                             "FrameStart");
+      auto msg =
+          std::string(
+              "\ttrigger_mode is activated. To trigger an image run `ros2 run ") +
+          this->get_name() + " trigger_image`";
+      log_warn(msg);
     }
-    // Enable trigger mode before setting the source and selector
-    // and before starting the stream. Trigger mode cannot be turned
-    // on and off while the device is streaming.
-
-    // Make sure Trigger Mode set to 'Off' after finishing this example
-    Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode", "On");
-
-    // Set the trigger source to software in order to trigger buffers
-    // without the use of any additional hardware.
-    // Lines of the GPIO can also be used to trigger.
-    Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerSource",
-                                           "Software");
-    Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerSelector",
-                                           "FrameStart");
-    auto msg =
-        std::string(
-            "\ttrigger_mode is activated. To trigger an image run `ros2 run ") +
-        this->get_name() + " trigger_image`";
-    log_warn(msg);
-  }
-  // unset device from being in trigger mode if user did not pass trigger
-  // mode parameter because the trigger nodes are not rest when loading
-  // the user default profile
-  else {
-    Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode", "Off");
+    // unset device from being in trigger mode if user did not pass trigger
+    // mode parameter because the trigger nodes are not rest when loading
+    // the user default profile
+    else {
+      Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode", "Off");
+    }
+  } catch (GenICam::GenericException& e) {
+    log_warn(std::string("\tTrigger mode configuration skipped: ") + e.what());
+  } catch (std::exception& e) {
+    log_warn(std::string("\tTrigger mode configuration skipped: ") + e.what());
   }
 }
 
