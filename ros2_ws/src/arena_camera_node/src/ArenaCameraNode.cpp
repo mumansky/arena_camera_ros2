@@ -257,6 +257,9 @@ void ArenaCameraNode::publish_images_()
                " published to " + topic_);
       this->m_pDevice->RequeueBuffer(pImage);
 
+      // Force update diagnostics since we're in a blocking loop
+      m_diagnostic_updater_->force_update();
+
     } catch (std::exception& e) {
       m_image_publish_errors_++;
       if (pImage) {
@@ -408,6 +411,9 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     response->message = msg;
     response->success = false;
   }
+
+  // Update diagnostics after trigger operation
+  m_diagnostic_updater_->force_update();
 }
 
 Arena::IDevice* ArenaCameraNode::create_device_ros_()
