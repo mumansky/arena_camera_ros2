@@ -16,6 +16,7 @@
 #include <rclcpp/timer.hpp>           // WallTimer
 #include <sensor_msgs/msg/image.hpp>  //image msg published
 #include <std_srvs/srv/trigger.hpp>   // Trigger
+#include <diagnostic_updater/diagnostic_updater.hpp>  // diagnostics
 
 // arena sdk
 #include "ArenaApi.h"
@@ -23,7 +24,10 @@
 class ArenaCameraNode : public rclcpp::Node
 {
  public:
-  ArenaCameraNode() : Node("arena_camera_node")
+  ArenaCameraNode() : Node("arena_camera_node"),
+    m_images_published_(0),
+    m_image_publish_errors_(0),
+    m_device_connected_(false)
   {
     // set stdout buffer size for ROS defined size BUFSIZE
     setvbuf(stdout, NULL, _IONBF, BUFSIZ);
@@ -51,6 +55,12 @@ class ArenaCameraNode : public rclcpp::Node
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_;
   rclcpp::TimerBase::SharedPtr m_wait_for_device_timer_callback_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr m_trigger_an_image_srv_;
+
+  // Diagnostics
+  std::unique_ptr<diagnostic_updater::Updater> m_diagnostic_updater_;
+  uint64_t m_images_published_;
+  uint64_t m_image_publish_errors_;
+  bool m_device_connected_;
 
   std::string serial_;
   bool is_passed_serial_;
@@ -108,4 +118,7 @@ class ArenaCameraNode : public rclcpp::Node
       std::shared_ptr<std_srvs::srv::Trigger::Response> response);
   void msg_form_image_(Arena::IImage* pImage,
                        sensor_msgs::msg::Image& image_msg);
+
+  // Diagnostics
+  void produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat);
 };
