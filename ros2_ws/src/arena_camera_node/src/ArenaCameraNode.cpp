@@ -244,6 +244,9 @@ void ArenaCameraNode::run_()
 void ArenaCameraNode::publish_images_()
 {
   Arena::IImage* pImage = nullptr;
+  auto last_diagnostics_update = std::chrono::steady_clock::now();
+  const auto diagnostics_update_interval = std::chrono::seconds(1);
+
   while (rclcpp::ok()) {
     try {
       auto p_image_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -265,6 +268,13 @@ void ArenaCameraNode::publish_images_()
         log_warn(std::string("Exception occurred while publishing an image\n") +
                  e.what());
       }
+    }
+
+    // Force update diagnostics at a fixed interval since we're in a blocking loop
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_diagnostics_update >= diagnostics_update_interval) {
+      m_diagnostic_updater_->force_update();
+      last_diagnostics_update = now;
     }
   };
 }
@@ -408,6 +418,9 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     response->message = msg;
     response->success = false;
   }
+
+  // Update diagnostics after trigger operation
+  m_diagnostic_updater_->force_update();
 }
 
 Arena::IDevice* ArenaCameraNode::create_device_ros_()
