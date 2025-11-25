@@ -4,6 +4,7 @@
 
 // ROS
 #include "rmw/types.h"
+#include <diagnostic_msgs/msg/diagnostic_status.hpp>
 
 // ArenaSDK
 #include "ArenaCameraNode.h"
@@ -191,6 +192,13 @@ void ArenaCameraNode::initialize_()
                << '\n';
 
   log_info(pub_qos_info.str());
+
+  //
+  // Diagnostics --------------------------------------------------------------
+  //
+  m_diagnostic_updater_ = std::make_unique<diagnostic_updater::Updater>(this);
+  m_diagnostic_updater_->setHardwareID("arena_camera");
+  m_diagnostic_updater_->add("Camera Status", this, &ArenaCameraNode::produce_diagnostics_);
 }
 
 void ArenaCameraNode::wait_for_device_timer_callback_()
@@ -224,6 +232,7 @@ void ArenaCameraNode::run_()
   m_pDevice.reset(device);
   set_nodes_();
   m_pDevice->StartStream();
+  m_device_connected_ = true;
 
   if (!trigger_mode_activated_) {
     publish_images_();
@@ -235,6 +244,9 @@ void ArenaCameraNode::run_()
 void ArenaCameraNode::publish_images_()
 {
   Arena::IImage* pImage = nullptr;
+  auto last_diagnostics_update = std::chrono::steady_clock::now();
+  const auto diagnostics_update_interval = std::chrono::seconds(1);
+
   while (rclcpp::ok()) {
     try {
       auto p_image_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -242,18 +254,27 @@ void ArenaCameraNode::publish_images_()
       msg_form_image_(pImage, *p_image_msg);
 
       m_pub_->publish(std::move(p_image_msg));
+      m_images_published_++;
 
       log_info(std::string("image ") + std::to_string(pImage->GetFrameId()) +
                " published to " + topic_);
       this->m_pDevice->RequeueBuffer(pImage);
 
     } catch (std::exception& e) {
+      m_image_publish_errors_++;
       if (pImage) {
         this->m_pDevice->RequeueBuffer(pImage);
         pImage = nullptr;
         log_warn(std::string("Exception occurred while publishing an image\n") +
                  e.what());
       }
+    }
+
+    // Force update diagnostics at a fixed interval since we're in a blocking loop
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_diagnostics_update >= diagnostics_update_interval) {
+      m_diagnostic_updater_->force_update();
+      last_diagnostics_update = now;
     }
   };
 }
@@ -361,6 +382,7 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
                " published to " + topic_;
     msg_form_image_(pImage, *p_image_msg);
     m_pub_->publish(std::move(p_image_msg));
+    m_images_published_++;
     response->message = msg;
     response->success = true;
 
@@ -370,6 +392,7 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
   }
 
   catch (std::exception& e) {
+    m_image_publish_errors_++;
     if (pImage) {
       this->m_pDevice->RequeueBuffer(pImage);
       pImage = nullptr;
@@ -383,6 +406,7 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
   }
 
   catch (GenICam::GenericException& e) {
+    m_image_publish_errors_++;
     if (pImage) {
       this->m_pDevice->RequeueBuffer(pImage);
       pImage = nullptr;
@@ -394,6 +418,9 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     response->message = msg;
     response->success = false;
   }
+
+  // Update diagnostics after trigger operation
+  m_diagnostic_updater_->force_update();
 }
 
 Arena::IDevice* ArenaCameraNode::create_device_ros_()
@@ -565,4 +592,33 @@ void ArenaCameraNode::set_nodes_test_pattern_image_()
 {
   auto nodemap = m_pDevice->GetNodeMap();
   Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TestPattern", "Pattern3");
+}
+
+void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat)
+{
+  if (m_device_connected_) {
+    if (m_image_publish_errors_ > 0) {
+      stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN,
+                   "Camera connected with errors");
+    } else {
+      stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK,
+                   "Camera operating normally");
+    }
+  } else {
+    stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR,
+                 "Camera not connected");
+  }
+
+  stat.add("Device Connected", m_device_connected_ ? "true" : "false");
+  stat.add("Images Published", std::to_string(m_images_published_));
+  stat.add("Publish Errors", std::to_string(m_image_publish_errors_));
+  stat.add("Trigger Mode", trigger_mode_activated_ ? "enabled" : "disabled");
+  stat.add("Topic", topic_);
+
+  if (m_device_connected_) {
+    stat.add("Serial", serial_.empty() ? "first discovered" : serial_);
+    stat.add("Width", std::to_string(width_));
+    stat.add("Height", std::to_string(height_));
+    stat.add("Pixel Format", pixelformat_ros_);
+  }
 }

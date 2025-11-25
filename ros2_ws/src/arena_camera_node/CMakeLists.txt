@@ -47,6 +47,7 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(diagnostic_updater REQUIRED)
 find_package(arena_sdk REQUIRED)
 
 # ------------
@@ -142,6 +143,7 @@ ament_target_dependencies(${target_name}  rclcpp
                                           std_msgs 
                                           std_srvs
                                           sensor_msgs
+                                          diagnostic_updater
                                           arena_sdk
                                           )
 
