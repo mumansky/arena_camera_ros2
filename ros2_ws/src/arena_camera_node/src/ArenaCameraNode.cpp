@@ -230,9 +230,9 @@ void ArenaCameraNode::run_()
 {
   auto device = create_device_ros_();
   m_pDevice.reset(device);
-  m_device_connected_ = true;
   set_nodes_();
   m_pDevice->StartStream();
+  m_device_connected_ = true;
 
   if (!trigger_mode_activated_) {
     publish_images_();
@@ -603,7 +603,7 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
   stat.add("Topic", topic_);
 
   if (m_device_connected_) {
-    stat.add("Serial", serial_.empty() ? "auto-detected" : serial_);
+    stat.add("Serial", serial_.empty() ? "first discovered" : serial_);
     stat.add("Width", std::to_string(width_));
     stat.add("Height", std::to_string(height_));
     stat.add("Pixel Format", pixelformat_ros_);
