@@ -258,7 +258,11 @@ void ArenaCameraNode::publish_images_()
 {
   Arena::IImage* pImage = nullptr;
   auto last_diagnostics_update = std::chrono::steady_clock::now();
+  auto last_info_log = std::chrono::steady_clock::now();
   const auto diagnostics_update_interval = std::chrono::seconds(1);
+  const auto info_log_interval = std::chrono::seconds(5);
+
+  log_info("Streaming started - publishing images to " + topic_);
 
   while (rclcpp::ok()) {
     try {
@@ -288,6 +292,13 @@ void ArenaCameraNode::publish_images_()
     if (now - last_diagnostics_update >= diagnostics_update_interval) {
       m_diagnostic_updater_->force_update();
       last_diagnostics_update = now;
+    }
+
+    // Periodic INFO log to show the node is still running
+    if (now - last_info_log >= info_log_interval) {
+      log_info("Published " + std::to_string(m_images_published_) + " images (" +
+               std::to_string(m_image_publish_errors_) + " errors)");
+      last_info_log = now;
     }
   };
 }
