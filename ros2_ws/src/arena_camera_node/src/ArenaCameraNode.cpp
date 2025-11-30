@@ -296,6 +296,10 @@ void ArenaCameraNode::msg_form_image_(Arena::IImage* pImage,
                                       sensor_msgs::msg::Image& image_msg)
 {
   try {
+    // Get actual image dimensions from the image itself
+    auto image_width = pImage->GetWidth();
+    auto image_height = pImage->GetHeight();
+
     // 1 ) Header
     //      - stamp.sec
     //      - stamp.nanosec
@@ -309,12 +313,12 @@ void ArenaCameraNode::msg_form_image_(Arena::IImage* pImage,
     //
     // 2 ) Height
     //
-    image_msg.height = height_;
+    image_msg.height = static_cast<uint32_t>(image_height);
 
     //
     // 3 ) Width
     //
-    image_msg.width = width_;
+    image_msg.width = static_cast<uint32_t>(image_width);
 
     //
     // 4 ) encoding
@@ -332,16 +336,16 @@ void ArenaCameraNode::msg_form_image_(Arena::IImage* pImage,
     //
     // TODO could be optimized by moving it out
     auto pixel_length_in_bytes = pImage->GetBitsPerPixel() / 8;
-    auto width_length_in_bytes = pImage->GetWidth() * pixel_length_in_bytes;
+    auto width_length_in_bytes = image_width * pixel_length_in_bytes;
     image_msg.step =
         static_cast<sensor_msgs::msg::Image::_step_type>(width_length_in_bytes);
 
     //
     // 7) data
     //
-    auto image_data_length_in_bytes = width_length_in_bytes * height_;
+    // Use GetSizeFilled() to get the actual payload size from the camera
+    auto image_data_length_in_bytes = pImage->GetSizeFilled();
     image_msg.data.resize(image_data_length_in_bytes);
-    auto x = pImage->GetData();
     std::memcpy(&image_msg.data[0], pImage->GetData(),
                 image_data_length_in_bytes);
 
