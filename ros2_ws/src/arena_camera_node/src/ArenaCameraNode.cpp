@@ -231,10 +231,23 @@ void ArenaCameraNode::run_()
   auto device = create_device_ros_();
   m_pDevice.reset(device);
   set_nodes_();
-  m_pDevice->StartStream();
+  log_debug("set_nodes_() completed, starting stream...");
+  
+  try {
+    m_pDevice->StartStream();
+    log_debug("StartStream() completed");
+  } catch (GenICam::GenericException& e) {
+    log_err(std::string("Failed to start stream: ") + e.what());
+    throw;
+  } catch (std::exception& e) {
+    log_err(std::string("Failed to start stream: ") + e.what());
+    throw;
+  }
+  
   m_device_connected_ = true;
 
   if (!trigger_mode_activated_) {
+    log_debug("Starting to publish images...");
     publish_images_();
   } else {
     // else ros::spin will
@@ -450,8 +463,11 @@ void ArenaCameraNode::set_nodes_()
   set_nodes_roi_();
   set_nodes_gain_();
   set_nodes_pixelformat_();
+  log_debug("set_nodes_pixelformat_() completed");
   set_nodes_exposure_();
+  log_debug("set_nodes_exposure_() completed");
   set_nodes_trigger_mode_();
+  log_debug("set_nodes_trigger_mode_() completed");
   // configure Auto Negotiate Packet Size and Packet Resend
   try {
     Arena::SetNodeValue<bool>(m_pDevice->GetTLStreamNodeMap(), "StreamAutoNegotiatePacketSize", true);
@@ -461,6 +477,7 @@ void ArenaCameraNode::set_nodes_()
   } catch (std::exception& e) {
     log_warn(std::string("\tStream configuration warning: ") + e.what());
   }
+  log_debug("Stream configuration completed");
 
   //set_nodes_test_pattern_image_();
 }
@@ -558,8 +575,8 @@ void ArenaCameraNode::set_nodes_exposure_()
 
 void ArenaCameraNode::set_nodes_trigger_mode_()
 {
-  auto nodemap = m_pDevice->GetNodeMap();
   try {
+    auto nodemap = m_pDevice->GetNodeMap();
     if (trigger_mode_activated_) {
       if (exposure_time_ < 0) {
         log_warn(
