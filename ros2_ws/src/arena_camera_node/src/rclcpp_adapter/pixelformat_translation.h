@@ -46,7 +46,10 @@ static std::map<std::string, std::string> K_ROS2_PIXELFORMAT_TO_PFNC(
      {sensor_msgs::image_encodings::BAYER_GRBG16,
       GetPixelFormatName(PfncFormat::BayerGR16)},
      {sensor_msgs::image_encodings::YUV422,
-      GetPixelFormatName(PfncFormat::YUV422_8)}});
+      GetPixelFormatName(PfncFormat::YUV422_8)},
+     // Polarization format for PHX050S1-QC camera
+     {"polarized_angles_0d_45d_90d_135d_bayer_rg8",
+      "PolarizedAngles_0d_45d_90d_135d_BayerRG8"}});
 
 static std::map<std::string, std::string> K_PFNC_TO_ROS2_PIXELFORMAT(
     {{GetPixelFormatName(PfncFormat::RGB8), sensor_msgs::image_encodings::RGB8},
@@ -84,4 +87,7 @@ static std::map<std::string, std::string> K_PFNC_TO_ROS2_PIXELFORMAT(
      {GetPixelFormatName(PfncFormat::BayerGR16),
       sensor_msgs::image_encodings::BAYER_GRBG16},
      {GetPixelFormatName(PfncFormat::YUV422_8),
-      sensor_msgs::image_encodings::YUV422}});
+      sensor_msgs::image_encodings::YUV422},
+     // Polarization format for PHX050S1-QC camera
+     {"PolarizedAngles_0d_45d_90d_135d_BayerRG8",
+      "polarized_angles_0d_45d_90d_135d_bayer_rg8"}});

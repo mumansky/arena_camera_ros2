@@ -231,10 +231,23 @@ void ArenaCameraNode::run_()
   auto device = create_device_ros_();
   m_pDevice.reset(device);
   set_nodes_();
-  m_pDevice->StartStream();
+  log_debug("set_nodes_() completed, starting stream...");
+  
+  try {
+    m_pDevice->StartStream();
+    log_debug("StartStream() completed");
+  } catch (GenICam::GenericException& e) {
+    log_err(std::string("Failed to start stream: ") + e.what());
+    throw;
+  } catch (std::exception& e) {
+    log_err(std::string("Failed to start stream: ") + e.what());
+    throw;
+  }
+  
   m_device_connected_ = true;
 
   if (!trigger_mode_activated_) {
+    log_debug("Starting to publish images...");
     publish_images_();
   } else {
     // else ros::spin will
@@ -256,7 +269,7 @@ void ArenaCameraNode::publish_images_()
       m_pub_->publish(std::move(p_image_msg));
       m_images_published_++;
 
-      log_info(std::string("image ") + std::to_string(pImage->GetFrameId()) +
+      log_debug(std::string("image ") + std::to_string(pImage->GetFrameId()) +
                " published to " + topic_);
       this->m_pDevice->RequeueBuffer(pImage);
 
@@ -283,6 +296,10 @@ void ArenaCameraNode::msg_form_image_(Arena::IImage* pImage,
                                       sensor_msgs::msg::Image& image_msg)
 {
   try {
+    // Get actual image dimensions from the image itself
+    auto image_width = pImage->GetWidth();
+    auto image_height = pImage->GetHeight();
+
     // 1 ) Header
     //      - stamp.sec
     //      - stamp.nanosec
@@ -296,12 +313,12 @@ void ArenaCameraNode::msg_form_image_(Arena::IImage* pImage,
     //
     // 2 ) Height
     //
-    image_msg.height = height_;
+    image_msg.height = static_cast<uint32_t>(image_height);
 
     //
     // 3 ) Width
     //
-    image_msg.width = width_;
+    image_msg.width = static_cast<uint32_t>(image_width);
 
     //
     // 4 ) encoding
@@ -319,16 +336,16 @@ void ArenaCameraNode::msg_form_image_(Arena::IImage* pImage,
     //
     // TODO could be optimized by moving it out
     auto pixel_length_in_bytes = pImage->GetBitsPerPixel() / 8;
-    auto width_length_in_bytes = pImage->GetWidth() * pixel_length_in_bytes;
+    auto width_length_in_bytes = image_width * pixel_length_in_bytes;
     image_msg.step =
         static_cast<sensor_msgs::msg::Image::_step_type>(width_length_in_bytes);
 
     //
     // 7) data
     //
-    auto image_data_length_in_bytes = width_length_in_bytes * height_;
+    // Use GetSizeFilled() to get the actual payload size from the camera
+    auto image_data_length_in_bytes = pImage->GetSizeFilled();
     image_msg.data.resize(image_data_length_in_bytes);
-    auto x = pImage->GetData();
     std::memcpy(&image_msg.data[0], pImage->GetData(),
                 image_data_length_in_bytes);
 
@@ -352,7 +369,7 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     response->success = false;
   }
 
-  log_info("A client triggered an image request");
+  log_debug("A client triggered an image request");
 
   Arena::IImage* pImage = nullptr;
   try {
@@ -365,7 +382,7 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
           Arena::GetNodeValue<bool>(m_pDevice->GetNodeMap(), "TriggerArmed");
 
       if (triggerArmed == false && (waitForTriggerCount % 10) == 0) {
-        log_info("waiting for trigger to be armed");
+        log_debug("waiting for trigger to be armed");
       }
 
     } while (triggerArmed == false);
@@ -386,7 +403,7 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     response->message = msg;
     response->success = true;
 
-    log_info(msg);
+    log_debug(msg);
     this->m_pDevice->RequeueBuffer(pImage);
 
   }
@@ -450,11 +467,21 @@ void ArenaCameraNode::set_nodes_()
   set_nodes_roi_();
   set_nodes_gain_();
   set_nodes_pixelformat_();
+  log_debug("set_nodes_pixelformat_() completed");
   set_nodes_exposure_();
+  log_debug("set_nodes_exposure_() completed");
   set_nodes_trigger_mode_();
+  log_debug("set_nodes_trigger_mode_() completed");
   // configure Auto Negotiate Packet Size and Packet Resend
-  Arena::SetNodeValue<bool>(m_pDevice->GetTLStreamNodeMap(), "StreamAutoNegotiatePacketSize", true);
-  Arena::SetNodeValue<bool>(m_pDevice->GetTLStreamNodeMap(), "StreamPacketResendEnable", true);
+  try {
+    Arena::SetNodeValue<bool>(m_pDevice->GetTLStreamNodeMap(), "StreamAutoNegotiatePacketSize", true);
+    Arena::SetNodeValue<bool>(m_pDevice->GetTLStreamNodeMap(), "StreamPacketResendEnable", true);
+  } catch (GenICam::GenericException& e) {
+    log_warn(std::string("\tStream configuration warning: ") + e.what());
+  } catch (std::exception& e) {
+    log_warn(std::string("\tStream configuration warning: ") + e.what());
+  }
+  log_debug("Stream configuration completed");
 
   //set_nodes_test_pattern_image_();
 }
@@ -552,38 +579,44 @@ void ArenaCameraNode::set_nodes_exposure_()
 
 void ArenaCameraNode::set_nodes_trigger_mode_()
 {
-  auto nodemap = m_pDevice->GetNodeMap();
-  if (trigger_mode_activated_) {
-    if (exposure_time_ < 0) {
-      log_warn(
-          "\tavoid long waits wating for triggered images by providing proper "
-          "exposure_time.");
+  try {
+    auto nodemap = m_pDevice->GetNodeMap();
+    if (trigger_mode_activated_) {
+      if (exposure_time_ < 0) {
+        log_warn(
+            "\tavoid long waits wating for triggered images by providing proper "
+            "exposure_time.");
+      }
+      // Enable trigger mode before setting the source and selector
+      // and before starting the stream. Trigger mode cannot be turned
+      // on and off while the device is streaming.
+
+      // Make sure Trigger Mode set to 'Off' after finishing this example
+      Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode", "On");
+
+      // Set the trigger source to software in order to trigger buffers
+      // without the use of any additional hardware.
+      // Lines of the GPIO can also be used to trigger.
+      Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerSource",
+                                             "Software");
+      Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerSelector",
+                                             "FrameStart");
+      auto msg =
+          std::string(
+              "\ttrigger_mode is activated. To trigger an image run `ros2 run ") +
+          this->get_name() + " trigger_image`";
+      log_warn(msg);
     }
-    // Enable trigger mode before setting the source and selector
-    // and before starting the stream. Trigger mode cannot be turned
-    // on and off while the device is streaming.
-
-    // Make sure Trigger Mode set to 'Off' after finishing this example
-    Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode", "On");
-
-    // Set the trigger source to software in order to trigger buffers
-    // without the use of any additional hardware.
-    // Lines of the GPIO can also be used to trigger.
-    Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerSource",
-                                           "Software");
-    Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerSelector",
-                                           "FrameStart");
-    auto msg =
-        std::string(
-            "\ttrigger_mode is activated. To trigger an image run `ros2 run ") +
-        this->get_name() + " trigger_image`";
-    log_warn(msg);
-  }
-  // unset device from being in trigger mode if user did not pass trigger
-  // mode parameter because the trigger nodes are not rest when loading
-  // the user default profile
-  else {
-    Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode", "Off");
+    // unset device from being in trigger mode if user did not pass trigger
+    // mode parameter because the trigger nodes are not rest when loading
+    // the user default profile
+    else {
+      Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode", "Off");
+    }
+  } catch (GenICam::GenericException& e) {
+    log_warn(std::string("\tTrigger mode configuration skipped: ") + e.what());
+  } catch (std::exception& e) {
+    log_warn(std::string("\tTrigger mode configuration skipped: ") + e.what());
   }
 }
 
