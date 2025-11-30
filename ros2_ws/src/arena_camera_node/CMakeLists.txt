@@ -212,6 +212,7 @@ install(TARGETS
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
+  find_package(ament_cmake_gtest REQUIRED)
   # the following line skips the linter which checks for copyrights
   # uncomment the line when a copyright and license is not present in all source files
   #set(ament_cmake_copyright_FOUND TRUE)
@@ -219,6 +220,31 @@ if(BUILD_TESTING)
   # uncomment the line when this package is not in a git repo
   #set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  # Pixel format translation tests
+  ament_add_gtest(test_pixelformat_translation
+    test/test_pixelformat_translation.cpp
+    src/rclcpp_adapter/pixelformat_translation.cpp
+  )
+  target_include_directories(test_pixelformat_translation PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  ament_target_dependencies(test_pixelformat_translation
+    rclcpp
+    sensor_msgs
+    arena_sdk
+  )
+
+  # QoS translation tests
+  ament_add_gtest(test_qos_translation
+    test/test_qos_translation.cpp
+  )
+  target_include_directories(test_qos_translation PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  ament_target_dependencies(test_qos_translation
+    rclcpp
+  )
 endif()
 
 ament_package()
