@@ -48,6 +48,7 @@ find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(diagnostic_updater REQUIRED)
+find_package(OpenCV REQUIRED)
 find_package(arena_sdk REQUIRED)
 
 # ------------
@@ -146,6 +147,9 @@ ament_target_dependencies(${target_name}  rclcpp
                                           diagnostic_updater
                                           arena_sdk
                                           )
+
+# OpenCV is required by ArenaSDK's libarena.so
+target_link_libraries(${target_name} ${OpenCV_LIBS})
 
 
 # MV EXEC to lib dir
