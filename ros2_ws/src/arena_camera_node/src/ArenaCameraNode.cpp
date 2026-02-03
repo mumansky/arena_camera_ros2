@@ -638,6 +638,33 @@ void ArenaCameraNode::publish_images_()
 void ArenaCameraNode::publish_one_image_()
 {
   // Non-blocking single image acquisition callback for timer-based streaming
+  
+  // Backpressure detection: Skip this callback if still processing previous image
+  // This prevents queue buildup when image processing takes longer than timer interval
+  bool expected = false;
+  if (!m_processing_image_.compare_exchange_strong(expected, true)) {
+    // Still processing previous image - skip this frame
+    m_backpressure_events_++;
+    if (m_backpressure_events_ % 100 == 1) {
+      // Log on 1st event and every 100th thereafter (1, 101, 201, ...) to catch initial issues
+      log_warn(std::string("Backpressure detected: skipping frame (total skipped: ") + 
+               std::to_string(m_backpressure_events_) + 
+               ", last processing time: " + std::to_string(m_last_processing_time_ms_) + "ms)");
+    }
+    return;
+  }
+  
+  // RAII scope guard to automatically reset processing flag on function exit
+  // This ensures the flag is always reset regardless of how we exit (return, exception, etc.)
+  struct ProcessingGuard {
+    std::atomic<bool>& flag;
+    explicit ProcessingGuard(std::atomic<bool>& f) : flag(f) {}
+    ~ProcessingGuard() { flag.store(false); }
+  } processing_guard(m_processing_image_);
+  
+  // Measure processing time
+  auto processing_start = std::chrono::steady_clock::now();
+  
   Arena::IImage* pImage = nullptr;
   
   try {
@@ -843,10 +870,25 @@ void ArenaCameraNode::publish_one_image_()
     }
     
     this->m_pDevice->RequeueBuffer(pImage);
+    
+    // Calculate and store processing time
+    auto processing_end = std::chrono::steady_clock::now();
+    m_last_processing_time_ms_ = std::chrono::duration<double, std::milli>(
+        processing_end - processing_start).count();
+    
+    // Update max processing time
+    if (m_last_processing_time_ms_ > m_max_processing_time_ms_) {
+      m_max_processing_time_ms_ = m_last_processing_time_ms_;
+    }
+    
+    // Update running average
+    m_total_processing_time_ms_ += m_last_processing_time_ms_;
+    m_processing_time_samples_++;
 
   } catch (GenICam::TimeoutException& e) {
     // Timeout is normal when camera is slow or no new frame available
     // Just return and wait for next timer callback
+    // Note: processing_guard RAII will automatically reset m_processing_image_ flag
     return;
   } catch (std::exception& e) {
     m_image_publish_errors_++;
@@ -855,7 +897,10 @@ void ArenaCameraNode::publish_one_image_()
       pImage = nullptr;
       log_err(std::string("Exception occurred while publishing an image: ") + e.what());
     }
+    // Note: processing_guard RAII will automatically reset m_processing_image_ flag
+    return;
   }
+  // Note: processing_guard RAII will automatically reset m_processing_image_ flag on exit
 }
 
 void ArenaCameraNode::msg_form_image_(Arena::IImage* pImage,
@@ -1477,9 +1522,16 @@ void ArenaCameraNode::set_nodes_test_pattern_image_()
 void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat)
 {
   if (m_device_connected_) {
-    if (m_image_publish_errors_ > 0) {
-      stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN,
-                   "Camera connected with errors");
+    if (m_image_publish_errors_ > 0 || m_backpressure_events_ > 0) {
+      std::string warn_msg = "Camera connected with";
+      if (m_image_publish_errors_ > 0) {
+        warn_msg += " errors";
+      }
+      if (m_backpressure_events_ > 0) {
+        if (m_image_publish_errors_ > 0) warn_msg += " and";
+        warn_msg += " backpressure";
+      }
+      stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, warn_msg);
     } else {
       stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK,
                    "Camera operating normally");
@@ -1495,6 +1547,18 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
   stat.add("Calculated FPS", std::to_string(m_calculated_fps_));
   stat.add("Trigger Mode", trigger_mode_activated_ ? "enabled" : "disabled");
   stat.add("Topic", topic_);
+  
+  // Backpressure metrics (Task 4)
+  stat.add("Backpressure Events", std::to_string(m_backpressure_events_));
+  stat.add("Last Processing Time (ms)", std::to_string(m_last_processing_time_ms_));
+  stat.add("Max Processing Time (ms)", std::to_string(m_max_processing_time_ms_));
+  if (m_processing_time_samples_ > 0) {
+    double avg_processing_time = m_total_processing_time_ms_ / m_processing_time_samples_;
+    stat.add("Avg Processing Time (ms)", std::to_string(avg_processing_time));
+  } else {
+    stat.add("Avg Processing Time (ms)", "N/A");
+  }
+  stat.add("Processing Time Samples", std::to_string(m_processing_time_samples_));
 
   if (m_device_connected_) {
     stat.add("Serial", serial_.empty() ? "first discovered" : serial_);

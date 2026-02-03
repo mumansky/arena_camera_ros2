@@ -10,6 +10,7 @@
 //
 
 // std
+#include <atomic>      // std::atomic for thread-safe backpressure flag
 #include <chrono>      //chrono_literals
 #include <functional>  // std::bind , std::placeholders
 
@@ -82,6 +83,14 @@ class ArenaCameraNode : public rclcpp::Node
   std::chrono::steady_clock::time_point m_fps_last_time_;
   uint64_t m_fps_frame_count_;
   double m_calculated_fps_;
+
+  // Backpressure monitoring (Task 4)
+  std::atomic<bool> m_processing_image_{false};  // Flag to detect if still processing
+  uint64_t m_backpressure_events_{0};            // Count of skipped frames due to backpressure
+  double m_last_processing_time_ms_{0.0};        // Last frame processing time in ms
+  double m_max_processing_time_ms_{0.0};         // Max processing time observed
+  double m_total_processing_time_ms_{0.0};       // Sum of processing times for average calculation
+  uint64_t m_processing_time_samples_{0};        // Number of processing time samples
 
   std::string serial_;
   bool is_passed_serial_;
