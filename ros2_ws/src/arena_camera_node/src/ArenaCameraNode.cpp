@@ -671,16 +671,13 @@ void ArenaCameraNode::publish_one_image_()
     auto time_since_last_image = std::chrono::duration_cast<std::chrono::seconds>(
         now - m_last_successful_image_time_).count();
     
-    // Attempt reconnection every 10 seconds
-    if (time_since_last_image >= 10) {
-      log_info("Attempting to reconnect to camera...");
-      m_consecutive_failures_ = 0;
-      m_device_connected_ = true;
-      m_last_successful_image_time_ = now;
-    } else {
+    // Attempt reconnection every 10 seconds by allowing one more GetImage attempt
+    if (time_since_last_image < 10) {
       // Still waiting to reconnect, skip this callback
       return;
     }
+    // If >= 10 seconds, fall through to attempt GetImage again
+    log_info("Attempting to reconnect to camera...");
   }
   
   try {
@@ -692,13 +689,14 @@ void ArenaCameraNode::publish_one_image_()
       return;  // No image available, will try again on next timer callback
     }
     
-    // Successfully got an image - reset failure counter
+    // Successfully got an image - reset failure counter and update connection status
+    bool was_disconnected = !m_device_connected_;
     m_consecutive_failures_ = 0;
+    m_device_connected_ = true;
     m_last_successful_image_time_ = std::chrono::steady_clock::now();
     
-    // If we were disconnected and got an image, we're reconnected
-    if (!m_device_connected_) {
-      m_device_connected_ = true;
+    // Log reconnection message if we were disconnected
+    if (was_disconnected) {
       log_info("Camera reconnected successfully");
     }
     
