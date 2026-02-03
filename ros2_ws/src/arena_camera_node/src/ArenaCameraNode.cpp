@@ -1358,11 +1358,24 @@ void ArenaCameraNode::set_nodes_frame_rate_()
                (acquisition_frame_rate_enable_ ? "true" : "false"));
     }
     
+    // Determine if frame rate control is enabled (either explicitly set or from camera)
+    bool frame_rate_enabled = is_passed_acquisition_frame_rate_enable_ 
+        ? acquisition_frame_rate_enable_ 
+        : Arena::GetNodeValue<bool>(nodemap, "AcquisitionFrameRateEnable");
+    
+    // If frame rate control is disabled, log and skip setting the frame rate value
+    if (!frame_rate_enabled) {
+      if (is_passed_acquisition_frame_rate_) {
+        log_info("\tFrame rate value specified but acquisition_frame_rate_enable is false. "
+                 "Frame rate control disabled, camera will run at maximum rate.");
+      } else {
+        log_debug("\tFrame rate control disabled, camera will run at maximum rate.");
+      }
+      return;
+    }
+    
     // Set frame rate value if specified and enabled
-    if (is_passed_acquisition_frame_rate_ && 
-        (is_passed_acquisition_frame_rate_enable_ ? acquisition_frame_rate_enable_ : 
-         Arena::GetNodeValue<bool>(nodemap, "AcquisitionFrameRateEnable"))) {
-      
+    if (is_passed_acquisition_frame_rate_) {
       // Get the node to validate min/max
       GenApi::CFloatPtr pAcquisitionFrameRate = nodemap->GetNode("AcquisitionFrameRate");
       
@@ -1381,11 +1394,28 @@ void ArenaCameraNode::set_nodes_frame_rate_()
           frame_rate = pAcquisitionFrameRate->GetMax();
         }
         
+        // Validate frame rate vs exposure time conflict
+        // Frame rate and exposure time are interdependent:
+        //   - max_exposure_time (in microseconds) ≈ 1,000,000 / frame_rate
+        // If the configured exposure time exceeds this limit, warn the user
+        if (is_passed_exposure_time_ && frame_rate > 0) {
+          // Calculate max exposure time in microseconds for given frame rate
+          double max_exposure_for_frame_rate = 1000000.0 / frame_rate;
+          if (exposure_time_ > max_exposure_for_frame_rate) {
+            log_warn(std::string("\tPotential conflict: Configured exposure time (") + 
+                     std::to_string(exposure_time_) + " us) exceeds maximum allowed by frame rate (" +
+                     std::to_string(max_exposure_for_frame_rate) + " us at " + 
+                     std::to_string(frame_rate) + " FPS). The camera may limit actual exposure time.");
+          }
+        }
+        
         Arena::SetNodeValue<double>(nodemap, "AcquisitionFrameRate", frame_rate);
         log_info(std::string("\tAcquisitionFrameRate set to ") + std::to_string(frame_rate) + " FPS");
       } else {
         log_warn("\tAcquisitionFrameRate node not writable");
       }
+    } else {
+      log_info("\tFrame rate control enabled but no frame rate value specified. Using camera default.");
     }
   } catch (GenICam::GenericException& e) {
     log_warn(std::string("\tFrame rate configuration warning: ") + e.what());
