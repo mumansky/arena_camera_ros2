@@ -164,20 +164,44 @@ void ArenaCameraNode::initialize_()
   // ARENASDK ---------------------------------------------------------------
   // Custom deleter for system
   m_pSystem =
-      std::shared_ptr<Arena::ISystem>(nullptr, [=](Arena::ISystem* pSystem) {
+      std::shared_ptr<Arena::ISystem>(nullptr, [this](Arena::ISystem* pSystem) {
         if (pSystem) {  // this is an issue for multi devices
-          Arena::CloseSystem(pSystem);
-          log_info("System is destroyed");
+          try {
+            Arena::CloseSystem(pSystem);
+            log_info("System is destroyed");
+          } catch (const std::exception& e) {
+            log_warn(std::string("Warning during system cleanup: ") + e.what());
+          } catch (...) {
+            log_warn("Unknown exception during system cleanup");
+          }
         }
       });
   m_pSystem.reset(Arena::OpenSystem());
 
-  // Custom deleter for device
+  // Custom deleter for device - ensures stream is stopped before device destruction
   m_pDevice =
-      std::shared_ptr<Arena::IDevice>(nullptr, [=](Arena::IDevice* pDevice) {
+      std::shared_ptr<Arena::IDevice>(nullptr, [this](Arena::IDevice* pDevice) {
         if (m_pSystem && pDevice) {
-          m_pSystem->DestroyDevice(pDevice);
-          log_info("Device is destroyed");
+          try {
+            // Safety check: stop stream if still running (should already be stopped by destructor)
+            if (m_is_streaming_.load()) {
+              try {
+                pDevice->StopStream();
+                m_is_streaming_.store(false);
+                log_info("Stream stopped in device deleter (safety fallback)");
+              } catch (const std::exception& e) {
+                log_warn(std::string("Warning during stream stop in deleter: ") + e.what());
+              } catch (...) {
+                log_warn("Unknown exception during stream stop in deleter");
+              }
+            }
+            m_pSystem->DestroyDevice(pDevice);
+            log_info("Device is destroyed");
+          } catch (const std::exception& e) {
+            log_warn(std::string("Warning during device cleanup: ") + e.what());
+          } catch (...) {
+            log_warn("Unknown exception during device cleanup");
+          }
         }
       });
 
@@ -365,6 +389,7 @@ void ArenaCameraNode::run_()
   
   try {
     m_pDevice->StartStream();
+    m_is_streaming_.store(true);
     log_debug("StartStream() completed");
   } catch (GenICam::GenericException& e) {
     log_err(std::string("Failed to start stream: ") + e.what());

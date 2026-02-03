@@ -10,6 +10,7 @@
 //
 
 // std
+#include <atomic>      // std::atomic for thread-safe flags
 #include <chrono>      //chrono_literals
 #include <functional>  // std::bind , std::placeholders
 
@@ -30,7 +31,8 @@ class ArenaCameraNode : public rclcpp::Node
   ArenaCameraNode() : Node("arena_camera_node"),
     m_images_published_(0),
     m_image_publish_errors_(0),
-    m_device_connected_(false)
+    m_device_connected_(false),
+    m_is_streaming_(false)
   {
     // set stdout buffer size for ROS defined size BUFSIZE
     setvbuf(stdout, NULL, _IONBF, BUFSIZ);
@@ -45,6 +47,48 @@ class ArenaCameraNode : public rclcpp::Node
   ~ArenaCameraNode()
   {
     log_info(std::string("Destroying \"") + this->get_name() + "\" node");
+    
+    // Cancel the image acquisition timer first to stop callbacks
+    if (m_image_acquisition_timer_) {
+      m_image_acquisition_timer_->cancel();
+      m_image_acquisition_timer_.reset();
+      log_info("Image acquisition timer cancelled");
+    }
+    
+    // Cancel the wait for device timer
+    if (m_wait_for_device_timer_callback_) {
+      m_wait_for_device_timer_callback_->cancel();
+      m_wait_for_device_timer_callback_.reset();
+      log_info("Device timer cancelled");
+    }
+    
+    // Stop streaming and clean up device resources
+    if (m_pDevice && m_is_streaming_.load()) {
+      try {
+        m_pDevice->StopStream();
+        m_is_streaming_.store(false);
+        log_info("Camera stream stopped");
+      } catch (const std::exception& e) {
+        log_warn(std::string("Warning during stream stop: ") + e.what());
+      } catch (...) {
+        log_warn("Unknown exception during stream stop");
+      }
+    }
+    
+    // Reset device first, then system (order matters for proper cleanup)
+    // The shared_ptr deleters will handle DestroyDevice and CloseSystem
+    if (m_pDevice) {
+      m_pDevice.reset();
+      log_info("Device resources released");
+    }
+    
+    if (m_pSystem) {
+      m_pSystem.reset();
+      log_info("System resources released");
+    }
+    
+    m_device_connected_ = false;
+    log_info(std::string("Destroyed \"") + this->get_name() + "\" node");
   }
 
   void log_debug(std::string msg) { RCLCPP_DEBUG(this->get_logger(), msg.c_str()); };
@@ -77,6 +121,9 @@ class ArenaCameraNode : public rclcpp::Node
   uint64_t m_images_published_;
   uint64_t m_image_publish_errors_;
   bool m_device_connected_;
+  
+  // Streaming state for proper cleanup (atomic for thread safety between destructor and deleters)
+  std::atomic<bool> m_is_streaming_;
   
   // FPS calculation
   std::chrono::steady_clock::time_point m_fps_last_time_;
