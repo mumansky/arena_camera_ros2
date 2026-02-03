@@ -149,8 +149,8 @@ void ArenaCameraNode::parse_parameters_()
     publish_compressed_ = (m_config_params_ && m_config_params_["publish_compressed"]) ?
                           m_config_params_["publish_compressed"].as<bool>() : false;
     
-    // Read consecutive timeout threshold from config file
-    m_consecutive_timeout_threshold_ = (m_config_params_ && m_config_params_["consecutive_timeout_threshold"]) ?
+    // Read consecutive failure threshold from config file
+    m_consecutive_failure_threshold_ = (m_config_params_ && m_config_params_["consecutive_timeout_threshold"]) ?
                                        m_config_params_["consecutive_timeout_threshold"].as<uint32_t>() : 50;
 
   } catch (rclcpp::ParameterTypeException& e) {
@@ -379,7 +379,7 @@ void ArenaCameraNode::run_()
   }
   
   m_device_connected_ = true;
-  m_consecutive_timeouts_ = 0;
+  m_consecutive_failures_ = 0;
   m_last_successful_image_time_ = std::chrono::steady_clock::now();
 
   if (!trigger_mode_activated_) {
@@ -641,6 +641,24 @@ void ArenaCameraNode::publish_images_()
   };
 }
 
+void ArenaCameraNode::check_and_handle_disconnect_()
+{
+  // Increment consecutive failure counter
+  m_consecutive_failures_++;
+  
+  // Check if we've exceeded the threshold
+  if (m_consecutive_failures_ >= m_consecutive_failure_threshold_) {
+    if (m_device_connected_) {
+      m_device_connected_ = false;
+      log_err("Camera disconnect detected: " + 
+              std::to_string(m_consecutive_failures_) + 
+              " consecutive failures exceeded threshold of " + 
+              std::to_string(m_consecutive_failure_threshold_));
+      log_err("Publishing paused. Will attempt reconnection...");
+    }
+  }
+}
+
 void ArenaCameraNode::publish_one_image_()
 {
   // Non-blocking single image acquisition callback for timer-based streaming
@@ -656,7 +674,7 @@ void ArenaCameraNode::publish_one_image_()
     // Attempt reconnection every 10 seconds
     if (time_since_last_image >= 10) {
       log_info("Attempting to reconnect to camera...");
-      m_consecutive_timeouts_ = 0;
+      m_consecutive_failures_ = 0;
       m_device_connected_ = true;
       m_last_successful_image_time_ = now;
     } else {
@@ -669,25 +687,13 @@ void ArenaCameraNode::publish_one_image_()
     // Use a short timeout since we're being called frequently by timer
     pImage = m_pDevice->GetImage(100);  // 100ms timeout
     if (!pImage) {
-      // Increment consecutive timeout counter
-      m_consecutive_timeouts_++;
-      
-      // Check if we've exceeded the threshold
-      if (m_consecutive_timeouts_ >= m_consecutive_timeout_threshold_) {
-        if (m_device_connected_) {
-          m_device_connected_ = false;
-          log_err("Camera disconnect detected: " + 
-                  std::to_string(m_consecutive_timeouts_) + 
-                  " consecutive timeouts exceeded threshold of " + 
-                  std::to_string(m_consecutive_timeout_threshold_));
-          log_err("Publishing paused. Will attempt reconnection...");
-        }
-      }
+      // Use helper to check for disconnect
+      check_and_handle_disconnect_();
       return;  // No image available, will try again on next timer callback
     }
     
-    // Successfully got an image - reset timeout counter
-    m_consecutive_timeouts_ = 0;
+    // Successfully got an image - reset failure counter
+    m_consecutive_failures_ = 0;
     m_last_successful_image_time_ = std::chrono::steady_clock::now();
     
     // If we were disconnected and got an image, we're reconnected
@@ -894,20 +900,8 @@ void ArenaCameraNode::publish_one_image_()
     this->m_pDevice->RequeueBuffer(pImage);
 
   } catch (GenICam::TimeoutException& e) {
-    // Increment consecutive timeout counter
-    m_consecutive_timeouts_++;
-    
-    // Check if we've exceeded the threshold
-    if (m_consecutive_timeouts_ >= m_consecutive_timeout_threshold_) {
-      if (m_device_connected_) {
-        m_device_connected_ = false;
-        log_err("Camera disconnect detected: " + 
-                std::to_string(m_consecutive_timeouts_) + 
-                " consecutive timeouts exceeded threshold of " + 
-                std::to_string(m_consecutive_timeout_threshold_));
-        log_err("Publishing paused. Will attempt reconnection...");
-      }
-    }
+    // Use helper to check for disconnect
+    check_and_handle_disconnect_();
     // Timeout is normal when camera is slow or no new frame available
     // Just return and wait for next timer callback
     return;
@@ -919,12 +913,8 @@ void ArenaCameraNode::publish_one_image_()
     }
     log_err(std::string("GenICam exception occurred while acquiring image: ") + e.what());
     
-    // Increment timeout counter for non-timeout exceptions too
-    m_consecutive_timeouts_++;
-    if (m_consecutive_timeouts_ >= m_consecutive_timeout_threshold_ && m_device_connected_) {
-      m_device_connected_ = false;
-      log_err("Camera disconnect suspected after exception. Publishing paused.");
-    }
+    // Use helper to check for disconnect
+    check_and_handle_disconnect_();
   } catch (std::exception& e) {
     m_image_publish_errors_++;
     if (pImage) {
@@ -933,12 +923,8 @@ void ArenaCameraNode::publish_one_image_()
     }
     log_err(std::string("Exception occurred while publishing an image: ") + e.what());
     
-    // Increment timeout counter for exceptions
-    m_consecutive_timeouts_++;
-    if (m_consecutive_timeouts_ >= m_consecutive_timeout_threshold_ && m_device_connected_) {
-      m_device_connected_ = false;
-      log_err("Camera disconnect suspected after exception. Publishing paused.");
-    }
+    // Use helper to check for disconnect
+    check_and_handle_disconnect_();
   }
 }
 

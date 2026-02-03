@@ -92,10 +92,11 @@
 
     # Camera Disconnect Detection
     # ---------------------------
-    # Number of consecutive GetImage() timeouts before camera is considered disconnected
-    # Lower values = faster detection but more false positives
-    # Higher values = more reliable but slower detection
-    # Recommended: 5-10 for 100ms timeout = 0.5-1.0 second detection time
+    # Number of consecutive GetImage() failures (timeouts or exceptions) before camera is considered disconnected
+    # With 100ms timeout per GetImage() call:
+    #   - Value of 50 = ~5 second detection time (recommended default)
+    #   - Value of 10 = ~1 second detection time (faster but more false positives)
+    #   - Value of 100 = ~10 second detection time (slower but very reliable)
     consecutive_timeout_threshold: 50
 
     # Image Publishing Options

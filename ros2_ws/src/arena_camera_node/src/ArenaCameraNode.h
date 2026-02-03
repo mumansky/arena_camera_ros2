@@ -31,8 +31,8 @@ class ArenaCameraNode : public rclcpp::Node
     m_images_published_(0),
     m_image_publish_errors_(0),
     m_device_connected_(false),
-    m_consecutive_timeouts_(0),
-    m_consecutive_timeout_threshold_(50)
+    m_consecutive_failures_(0),
+    m_consecutive_failure_threshold_(50)
   {
     // set stdout buffer size for ROS defined size BUFSIZE
     setvbuf(stdout, NULL, _IONBF, BUFSIZ);
@@ -86,8 +86,8 @@ class ArenaCameraNode : public rclcpp::Node
   double m_calculated_fps_;
   
   // Camera disconnect detection
-  uint32_t m_consecutive_timeouts_;
-  uint32_t m_consecutive_timeout_threshold_;
+  uint32_t m_consecutive_failures_;
+  uint32_t m_consecutive_failure_threshold_;
   std::chrono::steady_clock::time_point m_last_successful_image_time_;
 
   std::string serial_;
@@ -182,6 +182,7 @@ class ArenaCameraNode : public rclcpp::Node
   void set_nodes_test_pattern_image_();
   void publish_images_();  // Legacy blocking implementation
   void publish_one_image_();  // Non-blocking timer callback for image acquisition
+  void check_and_handle_disconnect_();  // Helper for camera disconnect detection
 
   void publish_an_image_on_trigger_(
       std::shared_ptr<std_srvs::srv::Trigger::Request> request,
