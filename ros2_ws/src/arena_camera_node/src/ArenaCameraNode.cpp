@@ -1027,7 +1027,8 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
 void ArenaCameraNode::list_available_cameras_(const std::vector<Arena::DeviceInfo>& device_infos)
 {
   log_info("=== Available Arena Cameras ===");
-  log_info(std::string("Found ") + std::to_string(device_infos.size()) + " camera(s):");
+  std::string camera_text = (device_infos.size() == 1) ? "camera" : "cameras";
+  log_info(std::string("Found ") + std::to_string(device_infos.size()) + " " + camera_text + ":");
   
   for (size_t i = 0; i < device_infos.size(); i++) {
     const auto& device_info = device_infos[i];
