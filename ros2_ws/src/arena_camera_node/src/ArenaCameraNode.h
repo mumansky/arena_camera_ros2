@@ -10,6 +10,7 @@
 //
 
 // std
+#include <atomic>      // atomic for thread-safe flags
 #include <chrono>      //chrono_literals
 #include <functional>  // std::bind , std::placeholders
 
@@ -30,7 +31,14 @@ class ArenaCameraNode : public rclcpp::Node
   ArenaCameraNode() : Node("arena_camera_node"),
     m_images_published_(0),
     m_image_publish_errors_(0),
-    m_device_connected_(false)
+    m_device_connected_(false),
+    m_is_processing_(false),
+    m_frames_skipped_(0),
+    m_backpressure_events_(0),
+    m_last_processing_time_ms_(0.0),
+    m_max_processing_time_ms_(0.0),
+    m_avg_processing_time_ms_(0.0),
+    m_processing_time_samples_(0)
   {
     // set stdout buffer size for ROS defined size BUFSIZE
     setvbuf(stdout, NULL, _IONBF, BUFSIZ);
@@ -82,6 +90,15 @@ class ArenaCameraNode : public rclcpp::Node
   std::chrono::steady_clock::time_point m_fps_last_time_;
   uint64_t m_fps_frame_count_;
   double m_calculated_fps_;
+
+  // Backpressure monitoring (Task 4: Timer Backpressure Risk)
+  std::atomic<bool> m_is_processing_;  // Flag to detect callback re-entry
+  uint64_t m_frames_skipped_;          // Frames skipped due to backpressure
+  uint64_t m_backpressure_events_;     // Total backpressure events (processing took too long)
+  double m_last_processing_time_ms_;   // Last image processing time in milliseconds
+  double m_max_processing_time_ms_;    // Maximum processing time observed
+  double m_avg_processing_time_ms_;    // Running average processing time
+  uint64_t m_processing_time_samples_; // Number of samples for average calculation
 
   std::string serial_;
   bool is_passed_serial_;
