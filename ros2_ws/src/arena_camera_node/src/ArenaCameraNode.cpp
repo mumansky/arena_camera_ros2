@@ -148,6 +148,10 @@ void ArenaCameraNode::parse_parameters_()
                    m_config_params_["publish_raw"].as<bool>() : true;
     publish_compressed_ = (m_config_params_ && m_config_params_["publish_compressed"]) ?
                           m_config_params_["publish_compressed"].as<bool>() : false;
+    
+    // Read consecutive timeout threshold from config file
+    m_consecutive_timeout_threshold_ = (m_config_params_ && m_config_params_["consecutive_timeout_threshold"]) ?
+                                       m_config_params_["consecutive_timeout_threshold"].as<uint32_t>() : 50;
 
   } catch (rclcpp::ParameterTypeException& e) {
     log_err("Parameter exception for: " + nextParameterToDeclare + " - " + std::string(e.what()));
@@ -375,6 +379,8 @@ void ArenaCameraNode::run_()
   }
   
   m_device_connected_ = true;
+  m_consecutive_timeouts_ = 0;
+  m_last_successful_image_time_ = std::chrono::steady_clock::now();
 
   if (!trigger_mode_activated_) {
     log_info("Streaming started - publishing images to " + topic_);
@@ -621,7 +627,7 @@ void ArenaCameraNode::publish_images_()
       if (pImage) {
         this->m_pDevice->RequeueBuffer(pImage);
         pImage = nullptr;
-        log_warn(std::string("Exception occurred while publishing an image\n") +
+        log_err(std::string("Exception occurred while publishing an image\n") +
                  e.what());
       }
     }
@@ -640,11 +646,54 @@ void ArenaCameraNode::publish_one_image_()
   // Non-blocking single image acquisition callback for timer-based streaming
   Arena::IImage* pImage = nullptr;
   
+  // Check if camera is currently disconnected
+  if (!m_device_connected_) {
+    // Try to reconnect if disconnected for too long
+    auto now = std::chrono::steady_clock::now();
+    auto time_since_last_image = std::chrono::duration_cast<std::chrono::seconds>(
+        now - m_last_successful_image_time_).count();
+    
+    // Attempt reconnection every 10 seconds
+    if (time_since_last_image >= 10) {
+      log_info("Attempting to reconnect to camera...");
+      m_consecutive_timeouts_ = 0;
+      m_device_connected_ = true;
+      m_last_successful_image_time_ = now;
+    } else {
+      // Still waiting to reconnect, skip this callback
+      return;
+    }
+  }
+  
   try {
     // Use a short timeout since we're being called frequently by timer
     pImage = m_pDevice->GetImage(100);  // 100ms timeout
     if (!pImage) {
+      // Increment consecutive timeout counter
+      m_consecutive_timeouts_++;
+      
+      // Check if we've exceeded the threshold
+      if (m_consecutive_timeouts_ >= m_consecutive_timeout_threshold_) {
+        if (m_device_connected_) {
+          m_device_connected_ = false;
+          log_err("Camera disconnect detected: " + 
+                  std::to_string(m_consecutive_timeouts_) + 
+                  " consecutive timeouts exceeded threshold of " + 
+                  std::to_string(m_consecutive_timeout_threshold_));
+          log_err("Publishing paused. Will attempt reconnection...");
+        }
+      }
       return;  // No image available, will try again on next timer callback
+    }
+    
+    // Successfully got an image - reset timeout counter
+    m_consecutive_timeouts_ = 0;
+    m_last_successful_image_time_ = std::chrono::steady_clock::now();
+    
+    // If we were disconnected and got an image, we're reconnected
+    if (!m_device_connected_) {
+      m_device_connected_ = true;
+      log_info("Camera reconnected successfully");
     }
     
     // Publish raw image if enabled
@@ -839,21 +888,56 @@ void ArenaCameraNode::publish_one_image_()
           }
       }
     } catch (std::exception& e) {
-      log_warn(std::string("Error extracting polarization channels: ") + e.what());
+      log_err(std::string("Error extracting polarization channels: ") + e.what());
     }
     
     this->m_pDevice->RequeueBuffer(pImage);
 
   } catch (GenICam::TimeoutException& e) {
+    // Increment consecutive timeout counter
+    m_consecutive_timeouts_++;
+    
+    // Check if we've exceeded the threshold
+    if (m_consecutive_timeouts_ >= m_consecutive_timeout_threshold_) {
+      if (m_device_connected_) {
+        m_device_connected_ = false;
+        log_err("Camera disconnect detected: " + 
+                std::to_string(m_consecutive_timeouts_) + 
+                " consecutive timeouts exceeded threshold of " + 
+                std::to_string(m_consecutive_timeout_threshold_));
+        log_err("Publishing paused. Will attempt reconnection...");
+      }
+    }
     // Timeout is normal when camera is slow or no new frame available
     // Just return and wait for next timer callback
     return;
+  } catch (GenICam::GenericException& e) {
+    m_image_publish_errors_++;
+    if (pImage) {
+      this->m_pDevice->RequeueBuffer(pImage);
+      pImage = nullptr;
+    }
+    log_err(std::string("GenICam exception occurred while acquiring image: ") + e.what());
+    
+    // Increment timeout counter for non-timeout exceptions too
+    m_consecutive_timeouts_++;
+    if (m_consecutive_timeouts_ >= m_consecutive_timeout_threshold_ && m_device_connected_) {
+      m_device_connected_ = false;
+      log_err("Camera disconnect suspected after exception. Publishing paused.");
+    }
   } catch (std::exception& e) {
     m_image_publish_errors_++;
     if (pImage) {
       this->m_pDevice->RequeueBuffer(pImage);
       pImage = nullptr;
-      log_err(std::string("Exception occurred while publishing an image: ") + e.what());
+    }
+    log_err(std::string("Exception occurred while publishing an image: ") + e.what());
+    
+    // Increment timeout counter for exceptions
+    m_consecutive_timeouts_++;
+    if (m_consecutive_timeouts_ >= m_consecutive_timeout_threshold_ && m_device_connected_) {
+      m_device_connected_ = false;
+      log_err("Camera disconnect suspected after exception. Publishing paused.");
     }
   }
 }
@@ -997,7 +1081,7 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     }
     auto msg =
         std::string("Exception occurred while grabbing an image\n") + e.what();
-    log_warn(msg);
+    log_err(msg);
     response->message = msg;
     response->success = false;
 
@@ -1012,7 +1096,7 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     auto msg =
         std::string("GenICam Exception occurred while grabbing an image\n") +
         e.what();
-    log_warn(msg);
+    log_err(msg);
     response->message = msg;
     response->success = false;
   }

@@ -90,6 +90,14 @@
     # When false (default), the camera continuously acquires and publishes images
     trigger_mode: false
 
+    # Camera Disconnect Detection
+    # ---------------------------
+    # Number of consecutive GetImage() timeouts before camera is considered disconnected
+    # Lower values = faster detection but more false positives
+    # Higher values = more reliable but slower detection
+    # Recommended: 5-10 for 100ms timeout = 0.5-1.0 second detection time
+    consecutive_timeout_threshold: 50
+
     # Image Publishing Options
     # ------------------------
     # Control which image formats to publish

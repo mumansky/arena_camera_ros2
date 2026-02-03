@@ -30,7 +30,9 @@ class ArenaCameraNode : public rclcpp::Node
   ArenaCameraNode() : Node("arena_camera_node"),
     m_images_published_(0),
     m_image_publish_errors_(0),
-    m_device_connected_(false)
+    m_device_connected_(false),
+    m_consecutive_timeouts_(0),
+    m_consecutive_timeout_threshold_(50)
   {
     // set stdout buffer size for ROS defined size BUFSIZE
     setvbuf(stdout, NULL, _IONBF, BUFSIZ);
@@ -82,6 +84,11 @@ class ArenaCameraNode : public rclcpp::Node
   std::chrono::steady_clock::time_point m_fps_last_time_;
   uint64_t m_fps_frame_count_;
   double m_calculated_fps_;
+  
+  // Camera disconnect detection
+  uint32_t m_consecutive_timeouts_;
+  uint32_t m_consecutive_timeout_threshold_;
+  std::chrono::steady_clock::time_point m_last_successful_image_time_;
 
   std::string serial_;
   bool is_passed_serial_;
