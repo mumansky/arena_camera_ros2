@@ -4,43 +4,41 @@
  * 
  * These tests verify the RAII behavior of ArenaImagePtr and ArenaImageVector.
  * Since we can't create real Arena::IImage objects without the SDK runtime,
- * we test the wrapper logic using nullptr and verify the RAII pattern.
+ * we test the wrapper logic using nullptr and verify the RAII pattern works
+ * correctly for edge cases.
  */
 
 #include <gtest/gtest.h>
 #include <memory>
 #include <vector>
 
-// We need to mock or test without actual Arena SDK calls
-// The following tests verify the RAII wrapper behavior
-
-// Test namespace for helper utilities used in testing
-namespace test_utils {
-  // Counter to track destructor calls for mock testing
-  static int mock_destroy_calls = 0;
-  
-  void reset_destroy_counter() {
-    mock_destroy_calls = 0;
-  }
-  
-  int get_destroy_counter() {
-    return mock_destroy_calls;
-  }
-}
+// Include the RAII wrapper header
+#include "arena_image_raii.h"
 
 /**
  * @brief Test that ArenaImageDeleter handles nullptr correctly
  */
 TEST(ArenaImageRaiiTest, DeleterHandlesNullptr)
 {
-  // This test verifies that the deleter does not crash on nullptr
-  // We can't test the actual Arena::IImage destruction without the SDK
-  // but we can verify the deleter is safe for nullptr
+  // Test that the deleter does not crash when given nullptr
+  arena_camera::ArenaImageDeleter deleter;
   
-  // This would be called by unique_ptr destructor with nullptr
-  // The deleter should handle this gracefully (no crash)
-  // This is an implicit test - if the code compiles and runs, the nullptr check works
-  SUCCEED() << "ArenaImageDeleter nullptr handling verified by code review";
+  // This should not crash or throw - nullptr should be handled gracefully
+  EXPECT_NO_THROW(deleter(nullptr));
+}
+
+/**
+ * @brief Test ArenaImagePtr with nullptr
+ */
+TEST(ArenaImageRaiiTest, ArenaImagePtrWithNullptr)
+{
+  // Create an ArenaImagePtr with nullptr
+  arena_camera::ArenaImagePtr ptr(nullptr);
+  
+  // Verify it's null
+  EXPECT_EQ(ptr.get(), nullptr);
+  
+  // Destruction should not crash (implicit test when ptr goes out of scope)
 }
 
 /**
@@ -48,11 +46,28 @@ TEST(ArenaImageRaiiTest, DeleterHandlesNullptr)
  */
 TEST(ArenaImageRaiiTest, ArenaImagePtrMoveSemantics)
 {
-  // Include the header to test compilation
-  // Note: Actual RAII testing would require mock Arena::IImage
-  // This test verifies the template instantiation and move semantics work
+  // Create an ArenaImagePtr with nullptr
+  arena_camera::ArenaImagePtr ptr1(nullptr);
   
-  SUCCEED() << "ArenaImagePtr move semantics verified by template instantiation";
+  // Move to another instance
+  arena_camera::ArenaImagePtr ptr2 = std::move(ptr1);
+  
+  // Verify the move worked
+  EXPECT_EQ(ptr2.get(), nullptr);
+  
+  // ptr1 should now be null after move (unique_ptr guarantee)
+  EXPECT_EQ(ptr1.get(), nullptr);
+}
+
+/**
+ * @brief Test make_arena_image_ptr helper function
+ */
+TEST(ArenaImageRaiiTest, MakeArenaImagePtrHelper)
+{
+  // Test the helper function with nullptr
+  auto ptr = arena_camera::make_arena_image_ptr(nullptr);
+  
+  EXPECT_EQ(ptr.get(), nullptr);
 }
 
 /**
@@ -60,9 +75,22 @@ TEST(ArenaImageRaiiTest, ArenaImagePtrMoveSemantics)
  */
 TEST(ArenaImageRaiiTest, ArenaImageVectorEmptyConstruction)
 {
-  // Test that we can include and use the header
-  // Full testing requires Arena SDK runtime
-  SUCCEED() << "ArenaImageVector empty construction verified";
+  arena_camera::ArenaImageVector vec;
+  
+  EXPECT_TRUE(vec.empty());
+  EXPECT_EQ(vec.size(), 0u);
+}
+
+/**
+ * @brief Test ArenaImageVector construction from empty std::vector
+ */
+TEST(ArenaImageRaiiTest, ArenaImageVectorFromEmptyStdVector)
+{
+  std::vector<Arena::IImage*> empty_vec;
+  arena_camera::ArenaImageVector vec(std::move(empty_vec));
+  
+  EXPECT_TRUE(vec.empty());
+  EXPECT_EQ(vec.size(), 0u);
 }
 
 /**
@@ -70,9 +98,16 @@ TEST(ArenaImageRaiiTest, ArenaImageVectorEmptyConstruction)
  */
 TEST(ArenaImageRaiiTest, ArenaImageVectorSize)
 {
-  // Verify the size() method behavior
-  // Without Arena SDK, we verify code compiles and API is correct
-  SUCCEED() << "ArenaImageVector size() API verified";
+  arena_camera::ArenaImageVector vec;
+  
+  EXPECT_EQ(vec.size(), 0u);
+  
+  // Add nullptr (safe to do, the deleter handles nullptr)
+  vec.push_back(nullptr);
+  EXPECT_EQ(vec.size(), 1u);
+  
+  vec.push_back(nullptr);
+  EXPECT_EQ(vec.size(), 2u);
 }
 
 /**
@@ -80,8 +115,40 @@ TEST(ArenaImageRaiiTest, ArenaImageVectorSize)
  */
 TEST(ArenaImageRaiiTest, ArenaImageVectorEmpty)
 {
-  // Verify the empty() method behavior
-  SUCCEED() << "ArenaImageVector empty() API verified";
+  arena_camera::ArenaImageVector vec;
+  
+  EXPECT_TRUE(vec.empty());
+  
+  vec.push_back(nullptr);
+  EXPECT_FALSE(vec.empty());
+}
+
+/**
+ * @brief Test ArenaImageVector clear() method
+ */
+TEST(ArenaImageRaiiTest, ArenaImageVectorClear)
+{
+  arena_camera::ArenaImageVector vec;
+  vec.push_back(nullptr);
+  vec.push_back(nullptr);
+  
+  EXPECT_EQ(vec.size(), 2u);
+  
+  vec.clear();
+  
+  EXPECT_TRUE(vec.empty());
+  EXPECT_EQ(vec.size(), 0u);
+}
+
+/**
+ * @brief Test ArenaImageVector operator[] access
+ */
+TEST(ArenaImageRaiiTest, ArenaImageVectorIndexAccess)
+{
+  arena_camera::ArenaImageVector vec;
+  vec.push_back(nullptr);
+  
+  EXPECT_EQ(vec[0], nullptr);
 }
 
 /**
@@ -89,8 +156,20 @@ TEST(ArenaImageRaiiTest, ArenaImageVectorEmpty)
  */
 TEST(ArenaImageRaiiTest, ArenaImageVectorMoveConstructor)
 {
-  // Verify move semantics are properly defined
-  SUCCEED() << "ArenaImageVector move constructor verified by compilation";
+  arena_camera::ArenaImageVector vec1;
+  vec1.push_back(nullptr);
+  vec1.push_back(nullptr);
+  
+  EXPECT_EQ(vec1.size(), 2u);
+  
+  // Move construct
+  arena_camera::ArenaImageVector vec2(std::move(vec1));
+  
+  // vec2 should have the elements
+  EXPECT_EQ(vec2.size(), 2u);
+  
+  // vec1 should be empty after move
+  EXPECT_TRUE(vec1.empty());
 }
 
 /**
@@ -98,35 +177,58 @@ TEST(ArenaImageRaiiTest, ArenaImageVectorMoveConstructor)
  */
 TEST(ArenaImageRaiiTest, ArenaImageVectorMoveAssignment)
 {
-  // Verify move assignment operator is properly defined
-  SUCCEED() << "ArenaImageVector move assignment verified by compilation";
+  arena_camera::ArenaImageVector vec1;
+  vec1.push_back(nullptr);
+  vec1.push_back(nullptr);
+  
+  arena_camera::ArenaImageVector vec2;
+  vec2.push_back(nullptr);
+  
+  EXPECT_EQ(vec1.size(), 2u);
+  EXPECT_EQ(vec2.size(), 1u);
+  
+  // Move assign
+  vec2 = std::move(vec1);
+  
+  // vec2 should now have 2 elements
+  EXPECT_EQ(vec2.size(), 2u);
+  
+  // vec1 should be empty after move
+  EXPECT_TRUE(vec1.empty());
 }
 
 /**
- * @brief Test that copy operations are deleted
+ * @brief Test ArenaImageVector iterator access
  */
-TEST(ArenaImageRaiiTest, ArenaImageVectorNonCopyable)
+TEST(ArenaImageRaiiTest, ArenaImageVectorIterator)
 {
-  // This test verifies that ArenaImageVector is non-copyable
-  // by checking that the code structure follows RAII best practices
-  // Actual compile-time check would fail if copy ops were enabled
-  SUCCEED() << "ArenaImageVector non-copyable verified by compilation";
+  arena_camera::ArenaImageVector vec;
+  vec.push_back(nullptr);
+  vec.push_back(nullptr);
+  
+  int count = 0;
+  for (auto* img : vec) {
+    EXPECT_EQ(img, nullptr);
+    count++;
+  }
+  
+  EXPECT_EQ(count, 2);
 }
 
 /**
- * @brief Test RAII header inclusion and namespace usage
+ * @brief Test self-move-assignment is safe
  */
-TEST(ArenaImageRaiiTest, HeaderInclusionAndNamespace)
+TEST(ArenaImageRaiiTest, ArenaImageVectorSelfMoveAssignment)
 {
-  // Include the arena_image_raii.h header
-  // This test ensures the header compiles correctly when included
-  #include "arena_image_raii.h"
+  arena_camera::ArenaImageVector vec;
+  vec.push_back(nullptr);
   
-  // Verify namespace exists
-  // Note: We can't actually instantiate ArenaImagePtr or ArenaImageVector
-  // without Arena SDK runtime, but we can verify the declarations compile
+  // Self-move-assignment should be safe
+  vec = std::move(vec);
   
-  SUCCEED() << "arena_image_raii.h header inclusion and arena_camera namespace verified";
+  // After self-move, behavior is implementation-defined, but it should not crash
+  // Just verify we can still access it without crashing
+  EXPECT_NO_THROW(vec.size());
 }
 
 int main(int argc, char** argv)
