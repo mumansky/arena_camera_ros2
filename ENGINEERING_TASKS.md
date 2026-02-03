@@ -503,7 +503,7 @@
 - Task 1: Resource Cleanup on Crash
 - Task 2: Memory Management in Polarization
 - Task 4: Timer Backpressure Risk
-- Task 6: Live Parameter Adjustment
+- Task 6: No Live Parameter Adjustment
 - Task 7: Trigger Mode Testing
 - Task 9: Exception Handling Gaps
 - Task 11: Per-Channel Publishing Control
