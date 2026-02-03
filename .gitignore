@@ -11,3 +11,4 @@ _codeql_detected_source_root
 *.egg-info
 *.tar.gz
 *.whl
+.vscode

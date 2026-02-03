@@ -50,6 +50,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(diagnostic_updater REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(arena_sdk REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 # ------------
 # EXPORT DEPS
@@ -80,10 +81,10 @@ find_package(arena_sdk REQUIRED)
 # -------------
 
 # install launch files.
-#install(
-#  DIRECTORY launch
-#  DESTINATION share/${PROJECT_NAME}/
-# )
+install(
+  DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}/
+)
 
 # --------
 # HEADERS
@@ -148,6 +149,9 @@ ament_target_dependencies(${target_name}  rclcpp
                                           arena_sdk
                                           )
 
+# Link yaml-cpp
+target_link_libraries(${target_name} yaml-cpp)
+
 # OpenCV is required by ArenaSDK's libarena.so
 target_link_libraries(${target_name} ${OpenCV_LIBS})
 
@@ -192,6 +196,7 @@ install(TARGETS
   ${trigger_image} 
     DESTINATION lib/${PROJECT_NAME}
 )
+
 # -----------------------------------------------------------------------------
 
 #

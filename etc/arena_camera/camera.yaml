@@ -1,0 +1,129 @@
+# Arena Camera ROS2 Node Configuration
+# This file contains all available parameters for the arena_camera_node
+
+/**:
+  ros__parameters:
+    # Device Selection
+    # ----------------
+    # Serial number of the camera to connect to. If not specified, the first discovered camera will be used.
+    # serial: 123456789
+    
+    # Image Topic Configuration
+    # -------------------------
+    # The ROS topic name where images will be published
+    topic: "/arena_camera_node/images"
+    
+    # QoS Settings
+    # ------------
+    # Quality of Service settings for the image publisher
+    # qos_history: "keep_last"  # Options: "keep_last", "keep_all"
+    # qos_history_depth: 10     # Number of messages to keep in history (only used with "keep_last")
+    # qos_reliability: "reliable"  # Options: "reliable", "best_effort"
+    
+    # Image Resolution
+    # ----------------
+    # Width and height of the image in pixels. If not specified, the camera's default resolution is used.
+    # width: 1920
+    # height: 1200
+    
+    # Pixel Format
+    # ------------
+    # The pixel format for the camera. Common options include:
+    # "mono8", "mono16", "rgb8", "bgr8", "bayer_rggb8", "bayer_grbg8", "bayer_gbrg8", "bayer_bggr8"
+    # If not specified, the camera's default pixel format is used.
+    # For polarized cameras: "polarized_angles_0d_45d_90d_135d_bayer_rg8"
+    pixelformat: "polarized_angles_0d_45d_90d_135d_bayer_rg8"
+    
+    # Gain Control
+    # ------------
+    # Camera gain value. Range depends on the specific camera model.
+    # If not specified, the camera's default gain setting is used.
+    # gain: 0.0
+    # Auto gain mode (device-dependent). Common values: "Off", "Once", "Continuous"
+    # When set to "Once" or "Continuous", manual gain is ignored.
+    auto_gain: "Off"
+    
+    # Exposure Control
+    # ----------------
+    # Exposure time in microseconds. When set, automatic exposure is disabled.
+    # The valid range depends on the frame rate and camera capabilities.
+    # If not specified, the camera's default exposure setting (typically auto) is used.
+    # exposure_time: 10000.0  # 10ms exposure
+    # Auto exposure mode (device-dependent). Common values: "Off", "Once", "Continuous"
+    # When set to "Once" or "Continuous", manual exposure_time is ignored.
+    auto_exposure: "Continuous"
+    # Enable shorter exposure times than normally available
+    # When true, allows exposure times below the standard minimum limit
+    short_exposure_enable: false    
+    # Advanced Auto Exposure Control
+    # ------------------------------
+    # Algorithm for auto exposure calculation. Common values: "Mean", "Median" 
+    # exposure_auto_algorithm: "Mean"
+    # Target brightness value for auto exposure (0-255, typically 128)
+    # target_brightness: 128
+    # Response speed for auto exposure changes (0-100, higher = slower response)
+    # exposure_auto_damping: 89.8
+    # Auto limit control: "Off" (manual limits), "Continuous" (auto-calculated limits)
+    # exposure_auto_limit_auto: "Off"
+    # Manual upper limit for auto exposure in microseconds (when limit_auto is "Off")
+    # exposure_auto_upper_limit: 10000.0  # 10ms
+    # Manual lower limit for auto exposure in microseconds (when limit_auto is "Off")  
+    # exposure_auto_lower_limit: 50.0     # 50us    
+    # Frame Rate Control
+    # ------------------
+    # Enable manual control of the acquisition frame rate
+    # When false (default), the camera runs at maximum frame rate
+    # When true, allows setting a specific frame rate using acquisition_frame_rate parameter
+    acquisition_frame_rate_enable: false
+    
+    # Target acquisition frame rate in frames per second (FPS)
+    # Only takes effect when acquisition_frame_rate_enable is true
+    # Valid range depends on camera model, resolution, and exposure time
+    # Note: Frame rate and exposure time are interdependent:
+    #   - Lower frame rate allows longer maximum exposure time
+    #   - max_exposure_time ≈ 1 / frame_rate
+    acquisition_frame_rate: 10
+    
+    # Trigger Mode
+    # ------------
+    # When true, the camera will only capture images when triggered via the trigger_image service
+    # When false (default), the camera continuously acquires and publishes images
+    trigger_mode: false
+
+    # Image Publishing Options
+    # ------------------------
+    # Control which image formats to publish
+    publish_raw: false       # Publish raw uncompressed images (sensor_msgs/Image)
+    publish_compressed: true  # Publish JPEG compressed images (sensor_msgs/CompressedImage)
+    # Note: You can enable both to publish raw and compressed simultaneously
+    # Compressed images are published to <topic>/compressed
+    # For polarized cameras, applies to both main topic and /pol_0deg channel
+
+# Example configurations for common use cases:
+# ============================================
+
+# High Speed Acquisition (maximize frame rate):
+# acquisition_frame_rate_enable: false  # Let camera run at max speed
+# exposure_time: 1000.0  # Short 1ms exposure
+
+# Controlled Frame Rate (e.g., for video recording at 30 FPS):
+# acquisition_frame_rate_enable: true
+# acquisition_frame_rate: 30.0
+# exposure_time: 10000.0  # 10ms exposure (well under 1/30s = 33.3ms limit)
+
+# Long Exposure (e.g., for low-light conditions):
+# acquisition_frame_rate_enable: true
+# acquisition_frame_rate: 10.0  # Lower frame rate to allow longer exposure
+# exposure_time: 90000.0  # 90ms exposure (under 1/10s = 100ms limit)
+
+# Triggered Acquisition (manual frame capture):
+# trigger_mode: true
+# exposure_time: 5000.0  # 5ms exposure per trigger
+
+# Compressed Image Only (save bandwidth):
+# publish_raw: false
+# publish_compressed: true
+
+# Both Raw and Compressed (maximum compatibility):
+# publish_raw: true
+# publish_compressed: true

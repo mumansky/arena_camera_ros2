@@ -1,0 +1,528 @@
+Cpp_Explore_Nodes
+  Only one device detected: PHX050S1-Q  254102443  172.24.0.30.
+  Automatically selecting this device.
+Commence example
+
+Device Nodemap
+  Root (Root)                                                                                  RO     Beginner      intfICategory       Root
+    Device Control (DeviceControl)                                                             RO     Beginner      intfICategory       Device Control
+      Device Type (DeviceType)                                                                 RO     Guru          intfIEnumeration    Transmitter
+      Scan Type (DeviceScanType)                                                               RO     Guru          intfIEnumeration    Areascan
+      Vendor Name (DeviceVendorName)                                                           RO     Beginner      intfIString         Lucid Vision Labs
+      Model Name (DeviceModelName)                                                             RO     Beginner      intfIString         PHX050S1-Q
+      Family Name (DeviceFamilyName)                                                           RO     Beginner      intfIString         Phoenix
+      Device Manufacturer Info (DeviceManufacturerInfo)                                        RO     Beginner      intfIString         Lucid Vision Labs (www.thinklucid.com)
+      Device Version (DeviceVersion)                                                           RO     Beginner      intfIString         FHYMY
+      Device Firmware Version (DeviceFirmwareVersion)                                          RO     Beginner      intfIString         1.91.0.0
+      Device Serial Number (DeviceSerialNumber)                                                RO     Beginner      intfIString         254102443
+      Device User ID (DeviceUserID)                                                            RW     Beginner      intfIString         
+      Device SFNC Version Major (DeviceSFNCVersionMajor)                                       RO     Beginner      intfIInteger        2
+      Device SFNC Version Minor (DeviceSFNCVersionMinor)                                       RO     Beginner      intfIInteger        3
+      Device SFNC Version Sub Minor (DeviceSFNCVersionSubMinor)                                RO     Beginner      intfIInteger        0
+      Device Manifest Entry Selector (DeviceManifestEntrySelector)                             RW     Guru          intfIInteger        1
+      Device Manifest XML Major Version (DeviceManifestXMLMajorVersion)                        RO     Guru          intfIInteger        1
+      Device Manifest XML Minor Version (DeviceManifestXMLMinorVersion)                        RO     Guru          intfIInteger        0
+      Device Manifest XML Sub Minor Version (DeviceManifestXMLSubMinorVersion)                 RO     Guru          intfIInteger        0
+      Device Manifest Schema Major Version (DeviceManifestSchemaMajorVersion)                  RO     Guru          intfIInteger        1
+      Device Manifest Schema Minor Version (DeviceManifestSchemaMinorVersion)                  RO     Guru          intfIInteger        1
+      Device Manifest Primary URL (DeviceManifestPrimaryURL)                                   RO     Guru          intfIString         ...
+      Device Manifest Secondary URL (DeviceManifestSecondaryURL)                               RO     Guru          intfIString         ...
+      Device TL Type (DeviceTLType)                                                            RO     Beginner      intfIEnumeration    GigEVision
+      Device TL Version Major (DeviceTLVersionMajor)                                           RO     Beginner      intfIInteger        2
+      Device TL Version Minor (DeviceTLVersionMinor)                                           RO     Beginner      intfIInteger        0
+      Device TL Version Sub Minor (DeviceTLVersionSubMinor)                                    RO     Beginner      intfIInteger        3
+      Device Max Throughput (DeviceMaxThroughput)                                              RO     Expert        intfIInteger        486153216
+      Device Link Selector (DeviceLinkSelector)                                                RW     Beginner      intfIInteger        0
+      Device Link Speed (DeviceLinkSpeed)                                                      RO     Expert        intfIInteger        125000000
+      Device Link Throughput Limit Mode (DeviceLinkThroughputLimitMode)                        RW     Expert        intfIEnumeration    Off
+      Device Link Throughput Limit (DeviceLinkThroughputLimit)                                 RO     Expert        intfIInteger        125000000
+      Device Link Throughput Reserve (DeviceLinkThroughputReserve)                             RW     Expert        intfIInteger        10
+      Device Link Heartbeat Mode (DeviceLinkHeartbeatMode)                                     RO     Expert        intfIEnumeration    On
+      Device Link Heartbeat Timeout (DeviceLinkHeartbeatTimeout)                               RW     Guru          intfIFloat          6e+06
+      Device Link Command Timeout (DeviceLinkCommandTimeout)                                   RO     Guru          intfIFloat          200000
+      Device Stream Channel Count (DeviceStreamChannelCount)                                   RO     Expert        intfIInteger        1
+      Device Stream Channel Selector (DeviceStreamChannelSelector)                             RW     Expert        intfIInteger        0
+      Device Stream Channel Type (DeviceStreamChannelType)                                     RO     Guru          intfIEnumeration    Transmitter
+      Device Stream Channel Endianness (DeviceStreamChannelEndianness)                         RO     Guru          intfIEnumeration    Little
+      Device Stream Channel Packet Size (DeviceStreamChannelPacketSize)                        RW     Expert        intfIInteger        9000
+      Device Event Channel Count (DeviceEventChannelCount)                                     RO     Expert        intfIInteger        1
+      Device Character Set (DeviceCharacterSet)                                                RO     Guru          intfIEnumeration    UTF8
+      Device Reset (DeviceReset)                                                               WO     Guru          intfICommand        -
+      Device Factory Reset (DeviceFactoryReset)                                                WO     Guru          intfICommand        -
+      Firmware Update (FirmwareUpdate)                                                         WO     Guru          intfICommand        -
+      Device Feature Persistence Start (DeviceFeaturePersistenceStart)                         WO     Guru          intfICommand        -
+      Device Feature Persistence End (DeviceFeaturePersistenceEnd)                             WO     Guru          intfICommand        -
+      Device Registers Streaming Start (DeviceRegistersStreamingStart)                         WO     Guru          intfICommand        -
+      Device Registers Streaming End (DeviceRegistersStreamingEnd)                             WO     Guru          intfICommand        -
+      Device Indicator Mode (DeviceIndicatorMode)                                              RW     Expert        intfIEnumeration    Active
+      Device Temperature Selector (DeviceTemperatureSelector)                                  RW     Expert        intfIEnumeration    Sensor
+      Device Temperature (DeviceTemperature)                                                   RO     Expert        intfIFloat          49.0000
+      Device Pressure (DevicePressure)                                                         NI     Expert        intfIFloat          -
+      Device Power (DevicePower)                                                               RO     Expert        intfIFloat          2.35
+      Device Clock Selector (DeviceClockSelector)                                              RW     Expert        intfIEnumeration    Sensor
+      Device Clock Frequency (DeviceClockFrequency)                                            RO     Expert        intfIFloat          3.72e+07
+      Timestamp (Timestamp)                                                                    RO     Expert        intfIInteger        3132748237392
+      Timestamp Reset (TimestampReset)                                                         WO     Expert        intfICommand        -
+      Timestamp Latch (TimestampLatch)                                                         WO     Expert        intfICommand        -
+      Timestamp Latch Value (TimestampLatchValue)                                              RO     Expert        intfIInteger        0
+      Device Up Time (DeviceUpTime)                                                            RO     Beginner      intfIInteger        3127
+      Link Up Time (LinkUpTime)                                                                RO     Beginner      intfIInteger        3123
+      Chip ID (ChipID)                                                                         NA     Guru          intfIString         -
+    Acquisition Control (AcquisitionControl)                                                   RO     Beginner      intfICategory       Acquisition Control
+      Acquisition Mode (AcquisitionMode)                                                       RW     Beginner      intfIEnumeration    Continuous
+      Acquisition Start Mode (AcquisitionStartMode)                                            RW     Beginner      intfIEnumeration    Normal
+      Acquisition Start (AcquisitionStart)                                                     WO     Beginner      intfICommand        -
+      Acquisition Stop (AcquisitionStop)                                                       WO     Beginner      intfICommand        -
+      Acquisition Frame Count (AcquisitionFrameCount)                                          RW     Beginner      intfIInteger        1
+      Acquisition Burst Frame Count (AcquisitionBurstFrameCount)                               RW     Beginner      intfIInteger        1
+      Acquisition Frame Rate Link Limit Enable (AcquisitionFrameRateLinkLimitEnable)           RW     Guru          intfIBoolean        1
+      Acquisition Frame Rate (AcquisitionFrameRate)                                            RW     Beginner      intfIFloat          10
+      Acquisition Frame Rate Enable (AcquisitionFrameRateEnable)                               RW     Expert        intfIBoolean        1
+      Acquisition Frame Time (AcquisitionFrameTime)                                            RW     Guru          intfIInteger        100000
+      Acquisition Line Rate (AcquisitionLineRate)                                              RO     Beginner      intfIFloat          5.062e+04
+      Acquisition Line Rate Enable (AcquisitionLineRateEnable)                                 NI     Expert        intfIBoolean        -
+      Acquisition Line Time (AcquisitionLineTime)                                              RO     Guru          intfIInteger        19754
+      Transmission Frame Rate (TransmissionFrameRate)                                          NI     Beginner      intfIFloat          -
+      PTP Sync Frame Rate (PTPSyncFrameRate)                                                   NA     Beginner      intfIFloat          -
+      PTP Sync Offset (PTPSyncOffset)                                                          NA     Expert        intfIInteger        -
+      First Line Strobe Enable (FirstLineStrobeEnable)                                         NI     Beginner      intfIBoolean        -
+      ISP Clock Speed (ISPClockSpeed)                                                          RW     Guru          intfIEnumeration    Normal
+      Trigger Selector (TriggerSelector)                                                       RW     Beginner      intfIEnumeration    FrameStart
+      Trigger Mode (TriggerMode)                                                               RW     Beginner      intfIEnumeration    Off
+      Trigger Software (TriggerSoftware)                                                       WO     Beginner      intfICommand        -
+      Trigger Source (TriggerSource)                                                           RW     Beginner      intfIEnumeration    Line0
+      Trigger Rescaler Source (TriggerRescalerSource)                                          NI     Beginner      intfIEnumeration    -
+      Trigger Activation (TriggerActivation)                                                   RW     Beginner      intfIEnumeration    RisingEdge
+      Trigger Overlap (TriggerOverlap)                                                         RW     Expert        intfIEnumeration    Off
+      Trigger Latency (TriggerLatency)                                                         RW     Expert        intfIEnumeration    Off
+      Trigger Latency Time (TriggerLatencyTime)                                                NA     Guru          intfIFloat          -
+      Trigger Delay (TriggerDelay)                                                             RW     Expert        intfIFloat          0
+      Trigger Stop Delay (TriggerStopDelay)                                                    NA     Expert        intfIFloat          -
+      Trigger Armed (TriggerArmed)                                                             RO     Expert        intfIBoolean        0
+      Trigger Multiplier (TriggerMultiplier)                                                   NI     Beginner      intfIInteger        -
+      Trigger Divider (TriggerDivider)                                                         NI     Beginner      intfIInteger        -
+      Exposure Time Mode (ExposureTimeMode)                                                    RW     Expert        intfIEnumeration    Common
+      Exposure Time Selector (ExposureTimeSelector)                                            RW     Beginner      intfIEnumeration    Common
+      Exposure Time (ExposureTime)                                                             RO     Beginner      intfIFloat          99810.9
+      Exposure Time Raw (ExposureTimeRaw)                                                      RO     Guru          intfIInteger        12476367
+      Short Exposure Enable (ShortExposureEnable)                                              RW     Guru          intfIBoolean        0
+      Exposure Auto (ExposureAuto)                                                             RW     Beginner      intfIEnumeration    Continuous
+      Exposure Auto Limit Auto (ExposureAutoLimitAuto)                                         RW     Beginner      intfIEnumeration    Continuous
+      Exposure Auto Lower Limit (ExposureAutoLowerLimit)                                       RO     Beginner      intfIFloat          33.488
+      Exposure Auto Upper Limit (ExposureAutoUpperLimit)                                       RO     Beginner      intfIFloat          99810.9
+      Target Brightness (TargetBrightness)                                                     RW     Beginner      intfIInteger        128
+      Exposure Auto Algorithm (ExposureAutoAlgorithm)                                          RW     Beginner      intfIEnumeration    Mean
+      Exposure Auto Damping (ExposureAutoDamping)                                              RW     Expert        intfIFloat          89.8
+      Exposure Auto Damping Raw (ExposureAutoDampingRaw)                                       RW     Expert        intfIInteger        230
+      Calculated Median (CalculatedMedian)                                                     RO     Beginner      intfIInteger        0
+      Calculated Mean (CalculatedMean)                                                         RO     Beginner      intfIInteger        13
+      Auto Exposure AOI (AutoExposureAOI)                                                      RO     Guru          intfICategory       Auto Exposure AOI
+        AOI Enable (AutoExposureAOIEnable)                                                     RW     Guru          intfIBoolean        0
+        AOI Width (AutoExposureAOIWidth)                                                       NA     Guru          intfIInteger        -
+        AOI Height (AutoExposureAOIHeight)                                                     NA     Guru          intfIInteger        -
+        AOI OffsetX (AutoExposureAOIOffsetX)                                                   NA     Guru          intfIInteger        -
+        AOI OffsetY (AutoExposureAOIOffsetY)                                                   NA     Guru          intfIInteger        -
+    Event Control (EventControl)                                                               RO     Expert        intfICategory       Event Control
+      Event Selector (EventSelector)                                                           RW     Expert        intfIEnumeration    ExposureStart
+      Event Notification (EventNotification)                                                   RO     Expert        intfIEnumeration    Off
+      Event Destination Address (EventDestinationAddress)                                      RO     Expert        intfIInteger        0.0.0.0
+      Event Exposure Start Data (EventExposureStartData)                                       NI     Expert        intfICategory       -
+      Event Exposure End Data (EventExposureEndData)                                           NI     Expert        intfICategory       -
+      Exposure Active Source (ExposureActiveSource)                                            NA     Expert        intfIEnumeration    -
+      Event Test Data (EventTestData)                                                          NI     Expert        intfICategory       -
+      Event Encoder 0 Stopped Data (EventEncoder0StoppedData)                                  NI     Expert        intfICategory       -
+      Event Encoder 0 Restarted Data (EventEncoder0RestartedData)                              NI     Expert        intfICategory       -
+      Event Frame Dropped Data (EventFrameDroppedData)                                         NI     Expert        intfICategory       -
+      Event No Available RDMA Credits Data (EventNoAvailableRDMACreditsData)                   NI     Expert        intfICategory       -
+      Event Temperature Out Of Range Data (EventTemperatureOutOfRangeData)                     NI     Expert        intfICategory       -
+      Event Data Overrun Data (EventDataOverrunData)                                           NI     Expert        intfICategory       -
+      Event Acquisition Trigger Missed Data (EventAcquisitionTriggerMissedData)                NI     Expert        intfICategory       -
+      Event Frame Trigger Missed Data (EventFrameTriggerMissedData)                            NI     Expert        intfICategory       -
+      Event Line Trigger Missed Data (EventLineTriggerMissedData)                              NI     Expert        intfICategory       -
+    User Set Control (UserSetControl)                                                          RO     Beginner      intfICategory       User Set Control
+      User Set Selector (UserSetSelector)                                                      RW     Beginner      intfIEnumeration    Default
+      User Set Load (UserSetLoad)                                                              WO     Beginner      intfICommand        -
+      User Set Save (UserSetSave)                                                              NA     Beginner      intfICommand        -
+      User Set Reset (UserSetReset)                                                            NA     Beginner      intfICommand        -
+      User Set Default (UserSetDefault)                                                        RW     Beginner      intfIEnumeration    Default
+      User Set Feature Selector (UserSetFeatureSelector)                                       RW     Expert        intfIEnumeration    ADCBitDepth
+      User Set Feature Enable (UserSetFeatureEnable)                                           RO     Expert        intfIBoolean        1
+    Test Control (TestControl)                                                                 RO     Guru          intfICategory       Test Control
+      Test Event Generate (TestEventGenerate)                                                  NA     Guru          intfICommand        -
+      Test Pending ACK (TestPendingAck)                                                        RW     Guru          intfIInteger        0
+      Test Mode (TestMode)                                                                     RW     Guru          intfIInteger        0
+      Test String (TestString)                                                                 RW     Guru          intfIString         
+    Transport Layer Control (TransportLayerControl)                                            RO     Beginner      intfICategory       Transport Layer Control
+      Payload Size (PayloadSize)                                                               RO     Expert        intfIInteger        5013504
+      GigE Vision (GigEVision)                                                                 RO     Beginner      intfICategory       GigE Vision
+        Physical Link Configuration (GevPhysicalLinkConfiguration)                             RW     Expert        intfIEnumeration    SingleLink
+        Current Physical Link Configuration (GevCurrentPhysicalLinkConfiguration)              RO     Expert        intfIEnumeration    SingleLink
+        Supported Option Selector (GevSupportedOptionSelector)                                 RW     Expert        intfIEnumeration    SingleLink
+        Supported Option (GevSupportedOption)                                                  RO     Expert        intfIBoolean        1
+        Interface Selector (GevInterfaceSelector)                                              RW     Beginner      intfIInteger        0
+        MAC Address (GevMACAddress)                                                            RO     Beginner      intfIInteger        1c:0f:af:43:f1:9a
+        PAUSE Frame Reception (GevPAUSEFrameReception)                                         NI     Expert        intfIBoolean        -
+        PAUSE Frame Transmission (GevPAUSEFrameTransmission)                                   NI     Expert        intfIBoolean        -
+        Current IP Configuration LLA (GevCurrentIPConfigurationLLA)                            RO     Beginner      intfIBoolean        1
+        Current IP Configuration DHCP (GevCurrentIPConfigurationDHCP)                          RW     Beginner      intfIBoolean        0
+        Current IP Configuration Persistent IP (GevCurrentIPConfigurationPersistentIP)         RW     Beginner      intfIBoolean        1
+        Current IP Address (GevCurrentIPAddress)                                               RO     Beginner      intfIInteger        172.24.0.30
+        Current Subnet Mask (GevCurrentSubnetMask)                                             RO     Beginner      intfIInteger        255.255.255.0
+        Current Default Gateway (GevCurrentDefaultGateway)                                     RO     Beginner      intfIInteger        0.0.0.0
+        IP Configuration Status (GevIPConfigurationStatus)                                     RO     Beginner      intfIEnumeration    PersistentIP
+        Persistent IP Address (GevPersistentIPAddress)                                         RW     Beginner      intfIInteger        172.24.0.30
+        Persistent Subnet Mask (GevPersistentSubnetMask)                                       RW     Beginner      intfIInteger        255.255.255.0
+        Persistent Default Gateway (GevPersistentDefaultGateway)                               RW     Beginner      intfIInteger        0.0.0.0
+        Persistent ARP Conflict Detection Enable (GevPersistentARPConflictDetectionEnable)     RW     Guru          intfIBoolean        1
+        Discovery ACK Delay (GevDiscoveryAckDelay)                                             RW     Expert        intfIInteger        20
+        GVCP Extended Status Codes Selector (GevGVCPExtendedStatusCodesSelector)               NI     Guru          intfIEnumeration    -
+        GVCP Extended Status Codes (GevGVCPExtendedStatusCodes)                                NI     Guru          intfIBoolean        -
+        GVCP Pending ACK (GevGVCPPendingAck)                                                   RW     Guru          intfIBoolean        1
+        Primary Application Switchover Key (GevPrimaryApplicationSwitchoverKey)                WO     Guru          intfIInteger        -
+        GVSP Extended ID Mode (GevGVSPExtendedIDMode)                                          RW     Expert        intfIEnumeration    On
+        CCP (GevCCP)                                                                           RO     Guru          intfIEnumeration    ControlAccessSwitchoverActive
+        Primary Application Socket (GevPrimaryApplicationSocket)                               RO     Guru          intfIInteger        50977
+        Primary Application IP Address (GevPrimaryApplicationIPAddress)                        RO     Guru          intfIInteger        172.24.0.10
+        Message Channel Port Host Port (GevMCPHostPort)                                        RW     Guru          intfIInteger        0
+        Message Channel Destination Address (GevMCDA)                                          RW     Guru          intfIInteger        0.0.0.0
+        Message Channel Transmission Timeout (GevMCTT)                                         RW     Guru          intfIInteger        0
+        Message Channel Retry Count (GevMCRC)                                                  RW     Guru          intfIInteger        0
+        Message Channel Source Port (GevMCSP)                                                  RO     Guru          intfIInteger        49153
+        Stream Channel Selector (GevStreamChannelSelector)                                     RW     Expert        intfIInteger        0
+        Stream Channel Port Interface Index (GevSCPInterfaceIndex)                             RO     Guru          intfIInteger        0
+        Stream Channel Port Host Port (GevSCPHostPort)                                         RW     Guru          intfIInteger        0
+        Stream Channel Packet Size Fire Test Packet (GevSCPSFireTestPacket)                    RO     Guru          intfIBoolean        0
+        Stream Channel Packet Size Do Not Fragment (GevSCPSDoNotFragment)                      RW     Guru          intfIBoolean        1
+        Stream Channel Packet Size Packet Size (GevSCPSPacketSize)                             RW     Expert        intfIInteger        9000
+        Stream Channel Packet Delay (GevSCPD)                                                  RW     Expert        intfIInteger        80
+        Stream Channel Destination Address (GevSCDA)                                           RW     Guru          intfIInteger        172.24.0.10
+        Stream Channel Source Port (GevSCSP)                                                   RO     Guru          intfIInteger        49154
+        Stream Channel Frame Transmission Delay (GevSCFTD)                                     RW     Guru          intfIInteger        0
+        TCP Enable (TCPEnable)                                                                 NA     Invisible     intfIBoolean        -
+        Transport Stream Protocol (TransportStreamProtocol)                                    RW     Expert        intfIEnumeration    UDP
+        Stream Channel TCP Max Transfer Size (GevSCTCPMTS)                                     NI     Guru          intfIInteger        -
+      Packet Resend Window Frame Count (PacketResendWindowFrameCount)                          RW     Guru          intfIInteger        4
+      Received Packet Resend Count (ReceivedPacketResendCount)                                 RO     Guru          intfIInteger        0
+      Valid Packet Resend Count (ValidPacketResendCount)                                       RO     Guru          intfIInteger        0
+      Unavailable Packet Resend Count (UnavailablePacketResendCount)                           RO     Guru          intfIInteger        0
+      Short Reach Mode Enable (ShortReachModeEnable)                                           NI     Guru          intfIBoolean        -
+      PTP Control (PtpControl)                                                                 RO     Expert        intfICategory       PTP Control
+        PTP Enable (PtpEnable)                                                                 RW     Expert        intfIBoolean        0
+        PTP Status (PtpStatus)                                                                 RO     Expert        intfIEnumeration    Disabled
+        PTP Slave Only (PtpSlaveOnly)                                                          RW     Expert        intfIBoolean        0
+        PTP Clock Accuracy (PtpClockAccuracy)                                                  RO     Expert        intfIEnumeration    GreaterThan10s
+        PTP Servo Status (PtpServoStatus)                                                      RO     Expert        intfIEnumeration    Disabled
+        PTP Timestamp (PtpDataSet)                                                             RO     Expert        intfIInteger        3133092643792
+        PTP Timestamp Latch (PtpDataSetLatch)                                                  WO     Expert        intfICommand        -
+        PTP Timestamp Latch Value (PtpDataSetLatchValue)                                       RO     Expert        intfIInteger        0
+        PTP Offset From Master (PtpOffsetFromMaster)                                           NA     Expert        intfIInteger        -
+        PTP Clock ID (PtpClockID)                                                              NA     Expert        intfIInteger        -
+        PTP Parent Clock ID (PtpParentClockID)                                                 NA     Expert        intfIInteger        -
+        PTP Grandmaster Clock ID (PtpGrandmasterClockID)                                       NA     Expert        intfIInteger        -
+    File Access Control (FileAccessControl)                                                    RO     Guru          intfICategory       File Access Control
+      File Selector (FileSelector)                                                             RW     Guru          intfIEnumeration    UserSetDefault
+      File Operation Selector (FileOperationSelector)                                          RW     Guru          intfIEnumeration    Open
+      File Operation Execute (FileOperationExecute)                                            WO     Guru          intfICommand        -
+      File Open Mode (FileOpenMode)                                                            RW     Guru          intfIEnumeration    Read
+      File Access Buffer (FileAccessBuffer)                                                    RW     Guru          intfIRegister       ...
+      File Access Offset (FileAccessOffset)                                                    NA     Guru          intfIInteger        -
+      File Access Length (FileAccessLength)                                                    NA     Guru          intfIInteger        -
+      File Operation Status (FileOperationStatus)                                              RO     Guru          intfIEnumeration    None
+      File Operation Result (FileOperationResult)                                              RO     Guru          intfIInteger        0
+      File Size (FileSize)                                                                     RO     Guru          intfIInteger        0
+      File Storage Size (FileStorageSize)                                                      RO     Guru          intfIInteger        16580608
+      File Storage Used Size (FileStorageUsedSize)                                             RO     Guru          intfIInteger        6488064
+      File Storage Free Size (FileStorageFreeSize)                                             RO     Guru          intfIInteger        10084352
+    Transfer Control (TransferControl)                                                         RO     Expert        intfICategory       Transfer Control
+      Transfer Selector (TransferSelector)                                                     RW     Expert        intfIEnumeration    Stream0
+      Transfer Control Mode (TransferControlMode)                                              RW     Expert        intfIEnumeration    Basic
+      Transfer Operation Mode (TransferOperationMode)                                          NA     Expert        intfIEnumeration    -
+      Transfer Block Count (TransferBlockCount)                                                NA     Expert        intfIInteger        -
+      Transfer Queue Max Block Count (TransferQueueMaxBlockCount)                              NA     Expert        intfIInteger        -
+      Transfer Queue Current Block Count (TransferQueueCurrentBlockCount)                      NA     Expert        intfIInteger        -
+      Transfer Queue Mode (TransferQueueMode)                                                  NA     Expert        intfIEnumeration    -
+      Transfer Start (TransferStart)                                                           NA     Expert        intfICommand        -
+      Transfer Stop (TransferStop)                                                             NA     Expert        intfICommand        -
+      Transfer Abort (TransferAbort)                                                           NA     Expert        intfICommand        -
+      Transfer Pause (TransferPause)                                                           NA     Guru          intfICommand        -
+      Transfer Resume (TransferResume)                                                         NA     Guru          intfICommand        -
+      Transfer Status Selector (TransferStatusSelector)                                        NA     Guru          intfIEnumeration    -
+      Transfer Status (TransferStatus)                                                         NA     Guru          intfIBoolean        -
+    Action Control (ActionControl)                                                             RO     Guru          intfICategory       Action Control
+      Action Unconditional Mode (ActionUnconditionalMode)                                      RW     Guru          intfIEnumeration    Off
+      Action PTP Sync Required (ActionPTPSyncRequired)                                         RW     Guru          intfIBoolean        1
+      Action Queue Size (ActionQueueSize)                                                      RO     Guru          intfIInteger        4
+      Action Device Key (ActionDeviceKey)                                                      WO     Guru          intfIInteger        -
+      Action Selector (ActionSelector)                                                         RW     Guru          intfIInteger        0
+      Action Group Key (ActionGroupKey)                                                        RW     Guru          intfIInteger        0
+      Action Group Mask (ActionGroupMask)                                                      RW     Guru          intfIInteger        0
+    Sequencer Control (SequencerControl)                                                       RO     Expert        intfICategory       Sequencer Control
+      Sequencer Mode (SequencerMode)                                                           RO     Expert        intfIEnumeration    Off
+      Sequencer Configuration Mode (SequencerConfigurationMode)                                RW     Expert        intfIEnumeration    Off
+      Sequencer Feature Selector (SequencerFeatureSelector)                                    RW     Expert        intfIEnumeration    BalanceRatio
+      Sequencer Feature Enable (SequencerFeatureEnable)                                        RO     Expert        intfIBoolean        1
+      Sequencer Set Selector (SequencerSetSelector)                                            RW     Expert        intfIInteger        0
+      Sequencer Set Save (SequencerSetSave)                                                    NA     Expert        intfICommand        -
+      Sequencer Set Load (SequencerSetLoad)                                                    NA     Expert        intfICommand        -
+      Sequencer Set Active (SequencerSetActive)                                                RO     Expert        intfIInteger        0
+      Sequencer Set Start (SequencerSetStart)                                                  RO     Expert        intfIInteger        0
+      Sequencer Path Selector (SequencerPathSelector)                                          RW     Expert        intfIInteger        0
+      Sequencer Set Next (SequencerSetNext)                                                    RO     Expert        intfIInteger        0
+      Sequencer Trigger Source (SequencerTriggerSource)                                        RO     Expert        intfIEnumeration    Off
+      Sequencer Trigger Activation (SequencerTriggerActivation)                                RO     Expert        intfIEnumeration    RisingEdge
+      Sequencer Set Frame Count (SequencerSetFrameCount)                                       RO     Expert        intfIInteger        1
+    Counter And Timer Control (CounterAndTimerControl)                                         RO     Expert        intfICategory       Counter And Timer Control
+      Counter Selector (CounterSelector)                                                       RW     Expert        intfIEnumeration    Counter0
+      Counter Event Source (CounterEventSource)                                                RW     Expert        intfIEnumeration    Off
+      Counter Event Activation (CounterEventActivation)                                        RW     Expert        intfIEnumeration    RisingEdge
+      Counter Trigger Source (CounterTriggerSource)                                            RW     Expert        intfIEnumeration    Off
+      Counter Trigger Activation (CounterTriggerActivation)                                    RW     Expert        intfIEnumeration    RisingEdge
+      Counter Reset Source (CounterResetSource)                                                RW     Expert        intfIEnumeration    Off
+      Counter Reset Activation (CounterResetActivation)                                        RW     Expert        intfIEnumeration    RisingEdge
+      Counter Reset (CounterReset)                                                             WO     Expert        intfICommand        -
+      Counter Value (CounterValue)                                                             RW     Expert        intfIInteger        0
+      Counter Value At Reset (CounterValueAtReset)                                             RO     Expert        intfIInteger        0
+      Counter Duration (CounterDuration)                                                       RW     Expert        intfIInteger        1
+      Counter Status (CounterStatus)                                                           RO     Expert        intfIEnumeration    CounterIdle
+      Timer Selector (TimerSelector)                                                           RW     Expert        intfIEnumeration    Timer0
+      Timer Trigger Source (TimerTriggerSource)                                                RW     Expert        intfIEnumeration    Off
+      Timer Trigger Activation (TimerTriggerActivation)                                        RW     Expert        intfIEnumeration    RisingEdge
+      Timer Duration (TimerDuration)                                                           RW     Expert        intfIFloat          1
+      Timer Delay (TimerDelay)                                                                 RW     Expert        intfIFloat          0
+      Timer Reset (TimerReset)                                                                 WO     Expert        intfICommand        -
+      Timer Value (TimerValue)                                                                 RW     Expert        intfIFloat          0
+      Timer Status (TimerStatus)                                                               RO     Expert        intfIEnumeration    TimerIdle
+    Software Signal Control (SoftwareSignalControl)                                            RO     Beginner      intfICategory       Software Signal Control
+      Software Signal Selector (SoftwareSignalSelector)                                        RW     Beginner      intfIEnumeration    SoftwareSignal0
+      Software Signal Pulse (SoftwareSignalPulse)                                              WO     Beginner      intfICommand        -
+    Digital IO Control (DigitalIOControl)                                                      RO     Expert        intfICategory       Digital IO Control
+      Line Configuration (LineConfiguration)                                                   RO     Expert        intfIEnumeration    Standard
+      Line Status All (LineStatusAll)                                                          RO     Expert        intfIInteger        0xc
+      Line Selector (LineSelector)                                                             RW     Expert        intfIEnumeration    Line0
+      Line Mode (LineMode)                                                                     RW     Expert        intfIEnumeration    Input
+      Line Inverter (LineInverter)                                                             RW     Expert        intfIBoolean        0
+      Line Status (LineStatus)                                                                 RO     Expert        intfIBoolean        0
+      Line Source (LineSource)                                                                 RW     Expert        intfIEnumeration    Off
+      Line Format (LineFormat)                                                                 RO     Expert        intfIEnumeration    OptoCoupled
+      Line Filter Selector (LineFilterSelector)                                                RW     Expert        intfIEnumeration    Deglitch
+      Line Filter Width (LineFilterWidth)                                                      RW     Expert        intfIFloat          0.02
+      Line Activation Voltage (LineActivationVoltage)                                          RW     Expert        intfIEnumeration    Low
+      Voltage External Enable (VoltageExternalEnable)                                          NA     Expert        intfIBoolean        -
+      Exposure Active Output Signal Mode (ExposureActiveOutputSignalMode)                      NI     Guru          intfIEnumeration    -
+      User Output Selector (UserOutputSelector)                                                RW     Expert        intfIEnumeration    UserOutput0
+      User Output Value (UserOutputValue)                                                      RW     Expert        intfIBoolean        0
+      User Output Value All (UserOutputValueAll)                                               RW     Expert        intfIInteger        0
+      User Output Value All Mask (UserOutputValueAllMask)                                      RW     Expert        intfIInteger        0
+    Image Format Control (ImageFormatControl)                                                  RO     Beginner      intfICategory       Image Format Control
+      Pixel Format (PixelFormat)                                                               RW     Beginner      intfIEnumeration    PolarizedAngles_0d_45d_90d_135d_BayerRG8
+      Pixel Size (PixelSize)                                                                   RO     Expert        intfIEnumeration    Bpp32
+      Pixel Format Mapping Selector (PixelFormatMappingSelector)                               RW     Guru          intfIEnumeration    DolpToRaw
+      Pixel Format Mapping Enable (PixelFormatMappingEnable)                                   RW     Guru          intfIBoolean        0
+      Polarized Angle Selector (PolarizedAngleSelector)                                        NA     Guru          intfIEnumeration    -
+      Pixel Dynamic Range Min (PixelDynamicRangeMin)                                           RO     Expert        intfIInteger        0
+      Pixel Dynamic Range Max (PixelDynamicRangeMax)                                           RO     Expert        intfIInteger        255
+      Pixel Color Filter (PixelColorFilter)                                                    RO     Expert        intfIEnumeration    None
+      ISP Bayer Pattern (IspBayerPattern)                                                      RO     Guru          intfIEnumeration    RGGB
+      Sensor Width (SensorWidth)                                                               RO     Expert        intfIInteger        2448
+      Sensor Height (SensorHeight)                                                             RO     Expert        intfIInteger        2048
+      Shutter Mode (SensorShutterMode)                                                         RW     Guru          intfIEnumeration    Global
+      Width Max (WidthMax)                                                                     RO     Expert        intfIInteger        1224
+      Height Max (HeightMax)                                                                   RO     Expert        intfIInteger        1024
+      Physical Pixel Size (PhysicalPixelSize)                                                  RO     Expert        intfIFloat          3.45
+      ADC Bit Depth (ADCBitDepth)                                                              RW     Expert        intfIEnumeration    Bits12
+      Imager Width (ImagerWidth)                                                               RO     Beginner      intfIInteger        2448
+      Imager Height (ImagerHeight)                                                             RO     Beginner      intfIInteger        2048
+      Imager Offset X (ImagerOffsetX)                                                          RO     Beginner      intfIInteger        0
+      Imager Offset Y (ImagerOffsetY)                                                          RO     Beginner      intfIInteger        0
+      ISP Width (ISPWidth)                                                                     RO     Expert        intfIInteger        1224
+      ISP Height (ISPHeight)                                                                   RO     Expert        intfIInteger        1024
+      Width (Width)                                                                            RW     Beginner      intfIInteger        1224
+      Height (Height)                                                                          RW     Beginner      intfIInteger        1024
+      Offset X (OffsetX)                                                                       RW     Beginner      intfIInteger        0
+      Offset Y (OffsetY)                                                                       RW     Beginner      intfIInteger        0
+      Multi ROI Rows Enable (MultipleROIRowsEnable)                                            RW     Expert        intfIBoolean        0
+      Multi ROI Row Selector (MultipleROIRowSelector)                                          NA     Expert        intfIInteger        -
+      Multi ROI Row Enable (MultipleROIRowEnable)                                              NA     Expert        intfIBoolean        -
+      Multi ROI Row Size (MultipleROIRowSize)                                                  NA     Expert        intfIInteger        -
+      Multi ROI Row Offset (MultipleROIRowOffset)                                              NA     Expert        intfIInteger        -
+      ReverseX (ReverseX)                                                                      NA     Expert        intfIBoolean        -
+      ReverseY (ReverseY)                                                                      NA     Expert        intfIBoolean        -
+      Binning Selector (BinningSelector)                                                       RW     Expert        intfIEnumeration    Digital
+      Binning Horizontal Mode (BinningHorizontalMode)                                          RW     Expert        intfIEnumeration    Sum
+      Binning Vertical Mode (BinningVerticalMode)                                              RW     Expert        intfIEnumeration    Sum
+      Binning Horizontal (BinningHorizontal)                                                   RW     Expert        intfIInteger        1
+      Binning Vertical (BinningVertical)                                                       RW     Expert        intfIInteger        1
+      Decimation Selector (DecimationSelector)                                                 NI     Expert        intfIEnumeration    -
+      Decimation Horizontal Mode (DecimationHorizontalMode)                                    NI     Expert        intfIEnumeration    -
+      Decimation Vertical Mode (DecimationVerticalMode)                                        NI     Expert        intfIEnumeration    -
+      Decimation Horizontal (DecimationHorizontal)                                             NI     Expert        intfIInteger        -
+      Decimation Vertical (DecimationVertical)                                                 NI     Expert        intfIInteger        -
+      Test Pattern (TestPattern)                                                               RW     Beginner      intfIEnumeration    Off
+      Test Pattern Bit Depth (TestPatternBitDepth)                                             RW     Guru          intfIEnumeration    Bits12
+    Analog Control (AnalogControl)                                                             RO     Beginner      intfICategory       Analog Control
+      Gain Selector (GainSelector)                                                             RW     Beginner      intfIEnumeration    All
+      Gain (Gain)                                                                              RW     Beginner      intfIFloat          0
+      Gain Raw (GainRaw)                                                                       RW     Guru          intfIInteger        0
+      Gain Auto (GainAuto)                                                                     RW     Beginner      intfIEnumeration    Off
+      Gain Auto Lower Limit (GainAutoLowerLimit)                                               RO     Beginner      intfIFloat          0
+      Gain Auto Upper Limit (GainAutoUpperLimit)                                               RO     Beginner      intfIFloat          48
+      Black Level Selector (BlackLevelSelector)                                                RW     Expert        intfIEnumeration    All
+      Black Level (BlackLevel)                                                                 RW     Expert        intfIFloat          0
+      Black Level Raw (BlackLevelRaw)                                                          RW     Guru          intfIInteger        0
+      Balance Ratio Selector (BalanceRatioSelector)                                            RW     Expert        intfIEnumeration    Red
+      Balance Ratio (BalanceRatio)                                                             RO     Expert        intfIFloat          1.3694
+      Balance White Auto (BalanceWhiteAuto)                                                    RW     Beginner      intfIEnumeration    Continuous
+      Balance White Enable (BalanceWhiteEnable)                                                RW     Expert        intfIBoolean        1
+      BalanceWhiteAuto Anchor Selector (BalanceWhiteAutoAnchorSelector)                        RW     Guru          intfIEnumeration    MaxRGB
+      AWB Gain Min (AwbWhiteBalanceGainMin)                                                    RW     Guru          intfIFloat          0
+      AWB Gain Max (AwbWhiteBalanceGainMax)                                                    RW     Guru          intfIFloat          15
+      Raw AWB Gain Min (AwbWhiteBalanceGainRawMin)                                             RW     Guru          intfIInteger        0
+      Raw AWB Gain Max (AwbWhiteBalanceGainRawMax)                                             RW     Guru          intfIInteger        65535
+      AWB Damping (AwbDamping)                                                                 RW     Expert        intfIFloat          100
+      AWB Damping Raw (AwbDampingRaw)                                                          RW     Expert        intfIInteger        256
+      AWB White Patch Enable (AwbWhitePatchEnable)                                             RW     Guru          intfIBoolean        1
+      AWB Stats Frame Count (AwbStatsFrameCount)                                               RW     Guru          intfIInteger        1
+      AWB Bayer Pattern (AwbBayerPattern)                                                      RO     Invisible     intfIEnumeration    RGGB
+      AWB AOI (AwbAOI)                                                                         NI     Guru          intfICategory       -
+    Defect Correction Control (DefectCorrectionControl)                                        RO     Guru          intfICategory       Defect Correction Control
+      Defect Correction Enable (DefectCorrectionEnable)                                        RW     Guru          intfIBoolean        1
+      Defect Correction Count (DefectCorrectionCount)                                          RO     Guru          intfIInteger        21
+      Defect Correction Index (DefectCorrectionIndex)                                          RW     Guru          intfIInteger        0
+      Defect Position X (DefectCorrectionPositionX)                                            RO     Guru          intfIInteger        1829
+      Defect Position Y (DefectCorrectionPositionY)                                            RO     Guru          intfIInteger        165
+      Defect Correction Get New Defect (DefectCorrectionGetNewDefect)                          WO     Guru          intfICommand        -
+      Defect Correction Apply (DefectCorrectionApply)                                          NA     Guru          intfICommand        -
+      Defect Correction Remove (DefectCorrectionRemove)                                        WO     Guru          intfICommand        -
+      Defect Correction Save (DefectCorrectionSave)                                            WO     Guru          intfICommand        -
+      Defect Correction Restore Default (DefectCorrectionRestoreDefault)                       WO     Guru          intfICommand        -
+    Chunk Data Control (ChunkDataControl)                                                      RO     Expert        intfICategory       Chunk Data Control
+      Chunk Mode Active (ChunkModeActive)                                                      RW     Expert        intfIBoolean        0
+      Chunk Selector (ChunkSelector)                                                           RW     Expert        intfIEnumeration    Image
+      Chunk Enable (ChunkEnable)                                                               RO     Expert        intfIBoolean        1
+      Chunk CRC (ChunkCRC)                                                                     NA     Expert        intfIInteger        -
+      Chunk Trigger Line (ChunkTriggerLine)                                                    NA     Expert        intfIInteger        -
+      Chunk Histogram Stats (ChunkHistogramStats)                                              NA     Expert        intfIRegister       -
+      Chunk Deep Neural Network Length (ChunkDeepNeuralNetworkLength)                          NA     Expert        intfIInteger        -
+      Chunk Deep Neural Network (ChunkDeepNeuralNetwork)                                       NA     Expert        intfIRegister       -
+      Chunk Pixel Contrast Score (ChunkContrastScore)                                          NA     Expert        intfIInteger        -
+      Chunk Pixel Minimum (ChunkPixelMin)                                                      NA     Expert        intfIInteger        -
+      Chunk Pixel Maximum (ChunkPixelMax)                                                      NA     Expert        intfIInteger        -
+      Chunk Pixel Mean (ChunkPixelMean)                                                        NA     Expert        intfIInteger        -
+      Chunk Pixel Standard Deviation (ChunkPixelStdDev)                                        NA     Expert        intfIFloat          -
+      Chunk Timestamp (ChunkTimestamp)                                                         NA     Expert        intfIInteger        -
+      Chunk Sequencer Set Active (ChunkSequencerSetActive)                                     NA     Expert        intfIInteger        -
+      Chunk Line Status All (ChunkLineStatusAll)                                               NA     Expert        intfIInteger        -
+      Chunk Pixel Format (ChunkPixelFormat)                                                    NA     Expert        intfIEnumeration    -
+      Chunk Pixel Dynamic Range Min (ChunkPixelDynamicRangeMin)                                NA     Expert        intfIInteger        -
+      Chunk Pixel Dynamic Range Max (ChunkPixelDynamicRangeMax)                                NA     Expert        intfIInteger        -
+      Chunk Width (ChunkWidth)                                                                 NA     Expert        intfIInteger        -
+      Chunk Height (ChunkHeight)                                                               NA     Expert        intfIInteger        -
+      Chunk Offset X (ChunkOffsetX)                                                            NA     Expert        intfIInteger        -
+      Chunk Offset Y (ChunkOffsetY)                                                            NA     Expert        intfIInteger        -
+      Chunk Gain (ChunkGain)                                                                   NA     Expert        intfIFloat          -
+      Chunk Black Level (ChunkBlackLevel)                                                      NA     Expert        intfIFloat          -
+      Chunk Exposure Time (ChunkExposureTime)                                                  NA     Expert        intfIFloat          -
+    Angle Gain Correction Control (AngleGainCorrectionControl)                                 RO     Guru          intfICategory       Angle Gain Correction Control
+      Angle Gain Correction Enable (AngleGainCorrectionEnable)                                 RW     Guru          intfIBoolean        0
+      Angle Gain Wavelength (AngleGainWavelength)                                              RW     Guru          intfIEnumeration    Custom
+      Angle Gain Tile (AngleGainTile)                                                          RW     Guru          intfIEnumeration    Red
+      Angle Gain Degree 90 (AngleGainDegree90)                                                 RW     Guru          intfIFloat          1
+      Angle Gain Degree 45 (AngleGainDegree45)                                                 RW     Guru          intfIFloat          1
+      Angle Gain Degree 135 (AngleGainDegree135)                                               RW     Guru          intfIFloat          1
+      Angle Gain Degree 0 (AngleGainDegree0)                                                   RW     Guru          intfIFloat          1
+    Serial Access Control (SerialAccessControl)                                                RO     Guru          intfICategory       Serial Access Control
+      Serial Operation Selector (SerialOperationSelector)                                      RW     Guru          intfIEnumeration    Read
+      Serial Operation Execute (SerialOperationExecute)                                        WO     Guru          intfICommand        -
+      Serial Access Buffer (SerialAccessBuffer)                                                RW     Guru          intfIRegister       ...
+      Serial Access Length (SerialAccessLength)                                                RW     Guru          intfIInteger        0
+      Serial Operation Status (SerialOperationStatus)                                          RO     Guru          intfIEnumeration    None
+      Serial Operation Result (SerialOperationResult)                                          RO     Guru          intfIInteger        0
+      Serial Received Size (SerialReceivedSize)                                                RO     Guru          intfIInteger        0
+      Serial Receive Source (SerialReceiveSource)                                              RW     Guru          intfIEnumeration    Off
+      Serial Baud Rate (SerialBaudRate)                                                        RW     Guru          intfIEnumeration    Baud57600
+      Serial Parity (SerialParity)                                                             RW     Guru          intfIEnumeration    None
+      Serial Stop Bits (SerialStopBits)                                                        RW     Guru          intfIEnumeration    StopBits1
+      Serial Data Bits (SerialDataBits)                                                        RW     Guru          intfIEnumeration    DataBits8
+      Serial Flow Control (SerialFlowControl)                                                  RW     Guru          intfIEnumeration    None
+    I2C Access Control (I2CAccessControl)                                                      RO     Guru          intfICategory       I2C Access Control
+      I2C Operation Selector (I2COperationSelector)                                            RW     Guru          intfIEnumeration    Read
+      I2C Operation Execute (I2COperationExecute)                                              WO     Guru          intfICommand        -
+      I2C Access Buffer (I2CAccessBuffer)                                                      RW     Guru          intfIRegister       ...
+      I2C Register Address (I2CRegisterAddress)                                                RW     Guru          intfIInteger        0
+      I2C Register Address Length (I2CRegisterAddressLength)                                   RW     Guru          intfIEnumeration    Bits8
+      I2C Register Data Length (I2CRegisterDataLength)                                         RW     Guru          intfIEnumeration    Bits8
+      I2C Access Length (I2CAccessLength)                                                      RW     Guru          intfIInteger        0
+      I2C Operation Status (I2COperationStatus)                                                RO     Guru          intfIEnumeration    None
+      I2C Operation Result (I2COperationResult)                                                RO     Guru          intfIInteger        0
+      I2C Slave Device Address (I2CSlaveDeviceAddress)                                         RW     Guru          intfIInteger        0
+      I2C Slave Device Address Length (I2CSlaveDeviceAddressLength)                            RW     Guru          intfIEnumeration    Bits7
+      I2C SCL Source (I2CSclSource)                                                            RW     Guru          intfIEnumeration    Off
+      I2C SDA Source (I2CSdaSource)                                                            RW     Guru          intfIEnumeration    Off
+
+TL Device Nodemap
+  Root (Root)                                                                                  RO     Beginner      intfICategory       Root
+    Device Information (DeviceInformation)                                                     RO     Beginner      intfICategory       Device Information
+      Device ID (DeviceID)                                                                     RO     Beginner      intfIString         254102443
+      Device Serial Number (DeviceSerialNumber)                                                RO     Beginner      intfIString         254102443
+      Device User ID (DeviceUserID)                                                            RO     Beginner      intfIString         
+      Device Vendor Name   (DeviceVendorName)                                                  RO     Beginner      intfIString         Lucid Vision Labs
+      Device Model Name (DeviceModelName)                                                      RO     Beginner      intfIString         PHX050S1-Q
+      Device Version (DeviceVersion)                                                           RO     Beginner      intfIString         1.91.0.0
+      Device Type (DeviceType)                                                                 RO     Expert        intfIEnumeration    GigEVision
+      Device Display Name (DeviceDisplayName)                                                  RO     Beginner      intfIString         PHX050S1-Q ( 254102443 ) 
+      Device Access Status (DeviceAccessStatus)                                                RW     Beginner      intfIEnumeration    ReadWrite
+      Gev Device IP Address (GevDeviceIPAddress)                                               RO     Expert        intfIInteger        172.24.0.30
+      Gev Device Subnet Mask (GevDeviceSubnetMask)                                             RO     Expert        intfIInteger        255.255.255.0
+      Gev Device MAC Address (GevDeviceMACAddress)                                             RO     Expert        intfIInteger        1c:0f:af:43:f1:9a
+      Gev Device Gateway (GevDeviceGateway)                                                    NA     Expert        intfIInteger        -
+    Device Control (DeviceControl)                                                             RO     Expert        intfICategory       Device Control
+      Ccp Switchover Key (CcpSwitchoverKey)                                                    RW     Expert        intfIInteger        0
+      Device Endianess Mechanism (DeviceEndianessMechanism)                                    RW     Expert        intfIEnumeration    Legacy
+      Device Stream Protocol (DeviceStreamProtocol)                                            RW     Expert        intfIEnumeration    Automatic
+    Stream Enumeration (StreamEnumeration)                                                     RO     Beginner      intfICategory       Stream Enumeration
+      Stream Selector (StreamSelector)                                                         RW     Beginner      intfIInteger        95830770199671
+      StreamID (StreamID)                                                                      NA     Beginner      intfIString         -
+    Action Command Control (ActionCommandControl)                                              RO     Expert        intfICategory       Action Command Control
+      Fire Action Command (ActionCommandFireCommand)                                           WO     Expert        intfICommand        -
+      Action Command Device Key (ActionCommandDeviceKey)                                       RW     Expert        intfIInteger        0
+      Action Command Group Key (ActionCommandGroupKey)                                         RW     Expert        intfIInteger        0
+      Action Command Group Mask (ActionCommandGroupMask)                                       RW     Expert        intfIInteger        0
+      Action Command Execute Time (ActionCommandExecuteTime)                                   RW     Expert        intfIInteger        0
+    Multipart Features (MultipartFeatures)                                                     RO     Expert        intfICategory       Multipart Features
+      Multipart Features Enable (MultipartFeaturesImplementedEnable)                           RW     Invisible     intfIBoolean        0
+      Multipart Enable (StreamMultipartEnable)                                                 NA     Expert        intfIBoolean        -
+
+TL Stream Nodemap
+  Root (Root)                                                                                  RO     Beginner      intfICategory       Root
+    Stream Information (StreamInformation)                                                     RO     Beginner      intfICategory       Stream Information
+      Stream ID (StreamID)                                                                     RO     Beginner      intfIString         0
+      Stream Type (StreamType)                                                                 RO     Expert        intfIEnumeration    GigEVision
+    Buffer Handling Control (BufferHandlingControl)                                            RO     Beginner      intfICategory       Buffer Handling Control
+      Stream Announced Buffer Count (StreamAnnouncedBufferCount)                               RO     Expert        intfIInteger        0
+      Stream Buffer Handling Mode (StreamBufferHandlingMode)                                   RW     Beginner      intfIEnumeration    OldestFirstOverwrite
+      Stream Announce Buffer Minimum (StreamAnnounceBufferMinimum)                             RO     Expert        intfIInteger        1
+      Stream Delivered Frame Count (StreamDeliveredFrameCount)                                 RO     Expert        intfIInteger        0
+      Stream Lost Frame Count (StreamLostFrameCount)                                           RO     Expert        intfIInteger        0
+      Stream Input Buffer Count (StreamInputBufferCount)                                       RO     Expert        intfIInteger        0
+      Stream Output Buffer Count (StreamOutputBufferCount)                                     RO     Expert        intfIInteger        0
+      Stream Started Frame Count (StreamStartedFrameCount)                                     RO     Expert        intfIInteger        0
+      Payload Size (PayloadSize)                                                               RO     Expert        intfIInteger        5013504
+      Stream Is Grabbing (StreamIsGrabbing)                                                    RO     Expert        intfIBoolean        0
+      Stream Chunk Count Maximum (StreamChunkCountMaximum)                                     RO     Expert        intfIInteger        0
+      Stream Buffer Alignment (StreamBufferAlignment)                                          RO     Expert        intfIInteger        1
+      Stream Missed Image Count (StreamMissedImageCount)                                       RO     Expert        intfIInteger        0
+      Stream Missed Packet Count (StreamMissedPacketCount)                                     RO     Expert        intfIInteger        0
+      Stream Cumulative Missed Image Count (StreamCumulativeMissedImageCount)                  RO     Expert        intfIInteger        0
+      Stream Cumulative Incomplete Image Count (StreamCumulativeIncompleteImageCount)          RO     Expert        intfIInteger        0
+      Packet Resend Enable (StreamPacketResendEnable)                                          RW     Expert        intfIBoolean        0
+      Multicast Enable (StreamMulticastEnable)                                                 RW     Expert        intfIBoolean        0
+      Auto-negotiate Packet Size (StreamAutoNegotiatePacketSize)                               RW     Expert        intfIBoolean        0
+      Max Number of Resend Requests Per Image (StreamMaxNumResendRequestsPerImage)             RW     Expert        intfIInteger        5
+    EVS Features (EvsFeatures)                                                                 RO     Expert        intfICategory       EVS Features
+      EVS Output Format (StreamEvsOutputFormat)                                                RW     Expert        intfIEnumeration    CDFrame
+      Accum time presets (StreamFrameGeneratorAccumTimePreset)                                 RW     Expert        intfIEnumeration    Accum_20ms
+      Accumulation Time (StreamFrameGeneratorAccumTime)                                        RW     Expert        intfIInteger        20000
+      Frame Generator Frame Rate (StreamFrameGeneratorFPS)                                     RW     Expert        intfIFloat          30.0
+
+GenICam exception thrown: Feature 'StreamEvsColorTheme' : cannot convert value '272', the value is invalid. : InvalidArgumentException thrown in node 'StreamEvsColorTheme' while calling 'StreamEvsColorTheme.ToString()' (file 'Enumeration.cpp', line 114)
+Press enter to complete

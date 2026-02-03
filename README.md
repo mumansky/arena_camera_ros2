@@ -34,7 +34,21 @@ Arena Camera deriver for ROS2 - forked and updated by Mark Umansky
     - arena_camera_node
       - this is the main node. It represent one LUCID Camera.
       - it has two executable `start` and `trigger_image`
-      - ros arguments
+      
+      ## Configuration
+      
+      The node automatically loads settings from `etc/arena_camera/camera.yaml` in the project root on startup. This allows you to set default camera parameters without using command-line arguments every time.
+      
+      **Priority:** Command-line ROS arguments always override settings from the config file.
+      
+      **Config file location:** `arena_camera_ros2/etc/arena_camera/camera.yaml`
+      
+      Edit this file to set your preferred defaults for parameters like resolution, exposure, gain, frame rate, etc.
+      
+      ## ROS Arguments
+      
+      All parameters can be set via ROS arguments, which will override any values in the config file:
+      
         - serial 
           - a string representing the serial of the device to create.
           - if not provided the node, it will represent the first dicovered camera.
@@ -58,12 +72,34 @@ Arena Camera deriver for ROS2 - forked and updated by Mark Umansky
         - gain
           - a double value represents the gain of the image.
 
+        - auto_gain
+          - sets camera gain auto mode via GenICam `GainAuto`.
+          - common values: "Off", "Once", "Continuous" (device-dependent).
+          - when set to "Once" or "Continuous", manual `gain` is ignored.
+
         - exposure_time
           - the time elapsed before the camera sensor creates the image.
           - units is micro seconds.
           - big values might makes the image take too long before it is view/published.
-          - if trigger_mode is passed to node them it is recommended to set exposure_time as well so the
+          - if trigger_mode is passed to node then it is recommended to set exposure_time as well so the
             triggered images do not take longer than expected.
+
+        - auto_exposure
+          - sets camera exposure auto mode via GenICam `ExposureAuto`.
+          - common values: "Off", "Once", "Continuous" (device-dependent).
+          - when set to "Once" or "Continuous", manual `exposure_time` is ignored.
+
+        - acquisition_frame_rate_enable
+          - enables manual control of the acquisition frame rate.
+          - when false (default), the camera runs at maximum frame rate.
+          - when true, allows setting a specific frame rate using acquisition_frame_rate parameter.
+          - values are true and false.
+
+        - acquisition_frame_rate
+          - target acquisition frame rate in frames per second (FPS).
+          - only takes effect when acquisition_frame_rate_enable is true.
+          - valid range depends on camera model, resolution, and exposure time.
+          - note: frame rate and exposure time are interdependent - lower frame rate allows longer exposure.
 
         - trigger_mode
           - puts the device in ready state where it will wait for a `trigger_image` client to request an image.
@@ -83,6 +119,19 @@ Arena Camera deriver for ROS2 - forked and updated by Mark Umansky
             `ros2 run image_tools showimage # no image will be displayed yet`
 
             `ros2 run arena_camera_node trigger_image`
+
+        - publish_raw
+          - controls whether to publish raw uncompressed images (sensor_msgs/Image).
+          - default value is true.
+          - values are true and false.
+          - raw images published to main topic (e.g., `/arena_camera_node/images`)
+
+        - publish_compressed
+          - controls whether to publish JPEG compressed images (sensor_msgs/CompressedImage).
+          - default value is false.
+          - values are true and false.
+          - compressed images published to `<topic>/compressed`
+          - both publish_raw and publish_compressed can be enabled simultaneously
        
       - QoS related parameters
         - if using these images with some subscriber make sure: 
@@ -106,9 +155,46 @@ Arena Camera deriver for ROS2 - forked and updated by Mark Umansky
             - supported values are "system_default", "reliable", "best_effort", "unknown".
             - more about `QoS`: https://index.ros.org/doc/ros2/Concepts/About-Quality-of-Service-Settings/
 
-        # simple example for using arguments together
+      ## Polarized Camera Support
+      
+      The node supports polarized cameras (e.g., PHX050S1-QC) with the `polarized_angles_0d_45d_90d_135d_bayer_rg8` pixel format.
+      
+      When using a polarized camera:
+      - The node automatically extracts and publishes all 4 polarization angle channels (0°, 45°, 90°, 135°)
+      - The main topic publishes raw 4-channel polarized data: `/arena_camera_node/images`
+      - **Note:** The main topic compressed (`/images/compressed`) is not used for polarized cameras (the 4-channel format cannot be compressed to JPEG)
+      - Eight polarization channel topics are published (depending on publish_raw/publish_compressed settings):
+        - `/arena_camera_node/pol_0deg` - raw BGR8 image of 0° channel (if publish_raw=true)
+        - `/arena_camera_node/pol_0deg/compressed` - JPEG compressed 0° (if publish_compressed=true)
+        - `/arena_camera_node/pol_45deg` - raw BGR8 image of 45° channel (if publish_raw=true)
+        - `/arena_camera_node/pol_45deg/compressed` - JPEG compressed 45° (if publish_compressed=true)
+        - `/arena_camera_node/pol_90deg` - raw BGR8 image of 90° channel (if publish_raw=true)
+        - `/arena_camera_node/pol_90deg/compressed` - JPEG compressed 90° (if publish_compressed=true)
+        - `/arena_camera_node/pol_135deg` - raw BGR8 image of 135° channel (if publish_raw=true)
+        - `/arena_camera_node/pol_135deg/compressed` - JPEG compressed 135° (if publish_compressed=true)
+      - The BGR8 conversion and compression happens automatically for each channel
+      
+      ## Example Usage
 
-          `ros2 run arena_camera_node start --ros-args -p serial:="904240001" -p topic:=/special_images -p width:=100 -p height:=200 -p pixelformat:=rgb8 -p gain:=10 -p exposure_time:=150 -p trigger_mode:=true` 
+        # Simple example with config file (settings loaded from etc/arena_camera/camera.yaml)
+        `ros2 run arena_camera_node start`
+
+        # Simple example overriding config with arguments
+
+        # Simple example overriding config with arguments
+        `ros2 run arena_camera_node start --ros-args -p serial:="904240001" -p topic:=/special_images -p width:=100 -p height:=200 -p pixelformat:=rgb8 -p gain:=10 -p exposure_time:=150 -p trigger_mode:=true` 
+
+        # Example with frame rate control
+        `ros2 run arena_camera_node start --ros-args -p acquisition_frame_rate_enable:=true -p acquisition_frame_rate:=30.0 -p exposure_time:=10000.0`
+
+        # Example with polarized camera
+        `ros2 run arena_camera_node start --ros-args -p pixelformat:=polarized_angles_0d_45d_90d_135d_bayer_rg8`
+
+        # Example publishing compressed images only (save bandwidth)
+        `ros2 run arena_camera_node start --ros-args -p publish_raw:=false -p publish_compressed:=true`
+
+        # Example publishing both raw and compressed
+        `ros2 run arena_camera_node start --ros-args -p publish_raw:=true -p publish_compressed:=true`
 
 - explore excutables
 
@@ -147,8 +233,7 @@ Available log levels (from most to least verbose): DEBUG, INFO, WARN, ERROR, FAT
 - support windows
 - add -h flag to nodes
 - showimage node to view 2D and 3D images
-- launch file
 - camera_info
 - access to nodemaps
-- settings dump/read to/from file
-- support two devices
+- support multiple devices simultaneously
+- dynamic reconfigure for runtime parameter changes
