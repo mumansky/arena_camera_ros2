@@ -92,9 +92,12 @@ void ArenaCameraNode::parse_parameters_()
     target_brightness_ = this->declare_parameter("target_brightness", target_brightness_default);
     is_passed_target_brightness_ = target_brightness_ >= 0;
 
-    // Set defaults for other internal parameters that are used but not exposed as ROS parameters
-    serial_ = "";
-    is_passed_serial_ = false;
+    // Read serial parameter from config file
+    nextParameterToDeclare = "serial";
+    std::string serial_default = (m_config_params_ && m_config_params_["serial"]) ?
+                      m_config_params_["serial"].as<std::string>() : "";
+    serial_ = this->declare_parameter("serial", serial_default);
+    is_passed_serial_ = serial_ != "";
     pixelformat_ros_ = (m_config_params_ && m_config_params_["pixelformat"]) ?
                        m_config_params_["pixelformat"].as<std::string>() : "";
     is_passed_pixelformat_ros_ = pixelformat_ros_ != "";
@@ -1021,6 +1024,18 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
   m_diagnostic_updater_->force_update();
 }
 
+void ArenaCameraNode::list_available_cameras_(const std::vector<Arena::DeviceInfo>& device_infos)
+{
+  log_info("=== Available Arena Cameras ===");
+  log_info(std::string("Found ") + std::to_string(device_infos.size()) + " camera(s):");
+  
+  for (size_t i = 0; i < device_infos.size(); i++) {
+    const auto& device_info = device_infos[i];
+    log_info(std::string("  [") + std::to_string(i) + "] " + DeviceInfoHelper::info(device_info));
+  }
+  log_info("===============================");
+}
+
 Arena::IDevice* ArenaCameraNode::create_device_ros_()
 {
   m_pSystem->UpdateDevices(100);  // in millisec
@@ -1031,13 +1046,26 @@ Arena::IDevice* ArenaCameraNode::create_device_ros_()
         "camera(s) were disconnected after they were discovered");
   }
 
+  // List all available cameras
+  list_available_cameras_(device_infos);
+
   auto index = 0;
   if (is_passed_serial_) {
-    index = DeviceInfoHelper::get_index_of_serial(device_infos, serial_);
+    log_info(std::string("Attempting to connect to camera with serial: ") + serial_);
+    try {
+      index = DeviceInfoHelper::get_index_of_serial(device_infos, serial_);
+      log_info(std::string("Found camera with matching serial at index ") + std::to_string(index));
+    } catch (const std::invalid_argument& e) {
+      log_err(std::string("Failed to find camera with serial '") + serial_ + "': " + e.what());
+      log_err("Please verify the serial number is correct and the camera is connected.");
+      throw;
+    }
+  } else {
+    log_info("No serial number specified, using first available camera");
   }
 
   auto pDevice = m_pSystem->CreateDevice(device_infos.at(index));
-  log_info(std::string("device created ") +
+  log_info(std::string("Successfully connected to camera: ") +
            DeviceInfoHelper::info(device_infos.at(index)));
   return pDevice;
 }

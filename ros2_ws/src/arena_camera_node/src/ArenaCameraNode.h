@@ -163,6 +163,7 @@ class ArenaCameraNode : public rclcpp::Node
   void run_();
   // TODO :
   // - handle misconfigured device
+  void list_available_cameras_(const std::vector<Arena::DeviceInfo>& device_infos);
   Arena::IDevice* create_device_ros_();
   void set_nodes_();
   void set_nodes_load_default_profile_();
