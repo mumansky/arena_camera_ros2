@@ -545,7 +545,7 @@ void ArenaCameraNode::publish_images_()
               }
               
               // Create max-combined image from all 4 polarization channels
-              if (publish_raw_ && m_pub_pol_max_ || publish_compressed_ && m_pub_pol_max_compressed_) {
+              if ((publish_raw_ && m_pub_pol_max_) || (publish_compressed_ && m_pub_pol_max_compressed_)) {
                 // Convert all channels to BGR8 first - use RAII wrapper for exception safety
                 arena_camera::ArenaImageVector bgr_channels;
                 for (size_t i = 0; i < 4; i++) {
