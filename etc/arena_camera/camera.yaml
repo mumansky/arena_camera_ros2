@@ -98,6 +98,23 @@
     # Note: You can enable both to publish raw and compressed simultaneously
     # Compressed images are published to <topic>/compressed
     # For polarized cameras, applies to both main topic and /pol_0deg channel
+    
+    # Compression Settings
+    # --------------------
+    # Compression format for compressed image messages
+    # Options: "jpeg" (lossy, smaller files), "png" (lossless, larger files)
+    # Trade-offs:
+    #   - JPEG: Faster encoding, smaller files (~10-20x), but lossy compression
+    #   - PNG: Lossless compression, larger files, slower encoding
+    # Default: "jpeg"
+    compression_format: "jpeg"
+    
+    # JPEG compression quality (1-100)
+    # Higher values = better quality but larger file sizes
+    # Typical values: 60-80 (good quality/size balance), 85-95 (high quality), 100 (maximum quality)
+    # Only used when compression_format is "jpeg"
+    # Default: 90
+    compression_quality: 90
 
 # Example configurations for common use cases:
 # ============================================

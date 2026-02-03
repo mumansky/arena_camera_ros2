@@ -151,6 +151,9 @@ class ArenaCameraNode : public rclcpp::Node
 
   bool publish_raw_;
   bool publish_compressed_;
+  
+  std::string compression_format_;
+  int compression_quality_;
 
   YAML::Node m_config_params_;
 

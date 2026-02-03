@@ -132,6 +132,27 @@ Arena Camera deriver for ROS2 - forked and updated by Mark Umansky
           - values are true and false.
           - compressed images published to `<topic>/compressed`
           - both publish_raw and publish_compressed can be enabled simultaneously
+        
+        - compression_format
+          - compression format for compressed image messages.
+          - supported values: "jpeg" (lossy, default), "png" (lossless).
+          - only used when publish_compressed is true.
+          - **Trade-offs:**
+            - **JPEG**: Faster encoding, smaller files (~10-20x compression), but lossy compression (some quality loss)
+            - **PNG**: Lossless compression (no quality loss), larger files, slower encoding
+          - for most robotics applications, JPEG with quality 85-95 provides good quality/bandwidth balance.
+          - use PNG when you need bit-perfect images (e.g., for calibration or precision measurements).
+        
+        - compression_quality
+          - JPEG compression quality (1-100).
+          - default value is 90.
+          - higher values = better quality but larger file sizes.
+          - only used when compression_format is "jpeg".
+          - **Typical values:**
+            - 60-80: Good quality/size balance for general use
+            - 85-95: High quality, suitable for detailed scenes
+            - 100: Maximum quality (near-lossless), large files
+          - recommended: start with 90 and adjust based on your bandwidth and quality needs.
        
       - QoS related parameters
         - if using these images with some subscriber make sure: 
@@ -195,6 +216,15 @@ Arena Camera deriver for ROS2 - forked and updated by Mark Umansky
 
         # Example publishing both raw and compressed
         `ros2 run arena_camera_node start --ros-args -p publish_raw:=true -p publish_compressed:=true`
+
+        # Example with custom JPEG quality (high quality for detailed scenes)
+        `ros2 run arena_camera_node start --ros-args -p publish_compressed:=true -p compression_quality:=95`
+
+        # Example with PNG compression (lossless)
+        `ros2 run arena_camera_node start --ros-args -p publish_compressed:=true -p compression_format:=png`
+
+        # Example with lower quality JPEG to save bandwidth
+        `ros2 run arena_camera_node start --ros-args -p publish_compressed:=true -p compression_quality:=70`
 
 - explore excutables
 

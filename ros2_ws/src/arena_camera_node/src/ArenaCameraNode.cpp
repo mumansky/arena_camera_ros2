@@ -148,6 +148,27 @@ void ArenaCameraNode::parse_parameters_()
                    m_config_params_["publish_raw"].as<bool>() : true;
     publish_compressed_ = (m_config_params_ && m_config_params_["publish_compressed"]) ?
                           m_config_params_["publish_compressed"].as<bool>() : false;
+    
+    // Read compression settings from config file
+    compression_format_ = (m_config_params_ && m_config_params_["compression_format"]) ?
+                          m_config_params_["compression_format"].as<std::string>() : "jpeg";
+    compression_quality_ = (m_config_params_ && m_config_params_["compression_quality"]) ?
+                           m_config_params_["compression_quality"].as<int>() : 90;
+    
+    // Validate compression quality
+    if (compression_quality_ < 1 || compression_quality_ > 100) {
+      log_warn("compression_quality must be between 1 and 100, using default 90");
+      compression_quality_ = 90;
+    }
+    
+    // Validate compression format
+    if (compression_format_ != "jpeg" && compression_format_ != "png") {
+      log_warn("compression_format must be 'jpeg' or 'png', using default 'jpeg'");
+      compression_format_ = "jpeg";
+    }
+    
+    log_info("Compression settings: format=" + compression_format_ + 
+             ", quality=" + std::to_string(compression_quality_));
 
   } catch (rclcpp::ParameterTypeException& e) {
     log_err("Parameter exception for: " + nextParameterToDeclare + " - " + std::string(e.what()));
@@ -417,7 +438,7 @@ void ArenaCameraNode::publish_images_()
           compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
           compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
           compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-          compressed_msg->format = "jpeg";
+          compressed_msg->format = compression_format_;
           
           Arena::IImage* image_to_compress = nullptr;
           bool need_cleanup = false;
@@ -444,8 +465,13 @@ void ArenaCameraNode::publish_images_()
                          cvType,
                          const_cast<void*>(static_cast<const void*>(image_to_compress->GetData())));
           
-          std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
-          cv::imencode(".jpg", img_mat, compressed_msg->data, params);
+          if (compression_format_ == "jpeg") {
+            std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
+            cv::imencode(".jpg", img_mat, compressed_msg->data, params);
+          } else if (compression_format_ == "png") {
+            std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 3};
+            cv::imencode(".png", img_mat, compressed_msg->data, params);
+          }
           
           if (need_cleanup) {
             Arena::ImageFactory::Destroy(image_to_compress);
@@ -528,13 +554,19 @@ void ArenaCameraNode::publish_images_()
                   compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
                   compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
                   compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                  compressed_msg->format = "jpeg";
+                  compressed_msg->format = compression_format_;
                   
-                  // Convert to cv::Mat and compress with JPEG
+                  // Convert to cv::Mat and compress
                   cv::Mat bgr_mat(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3, 
                                  const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
-                  std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
-                  cv::imencode(".jpg", bgr_mat, compressed_msg->data, params);
+                  
+                  if (compression_format_ == "jpeg") {
+                    std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
+                    cv::imencode(".jpg", bgr_mat, compressed_msg->data, params);
+                  } else if (compression_format_ == "png") {
+                    std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 3};
+                    cv::imencode(".png", bgr_mat, compressed_msg->data, params);
+                  }
                   
                   (*info.compressed_pub)->publish(std::move(compressed_msg));
                 }
@@ -589,11 +621,16 @@ void ArenaCameraNode::publish_images_()
                   compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
                   compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
                   compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                  compressed_msg->format = "jpeg";
+                  compressed_msg->format = compression_format_;
                   
-                  // Compress with JPEG (max_mat already computed above)
-                  std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
-                  cv::imencode(".jpg", max_mat, compressed_msg->data, params);
+                  // Compress (max_mat already computed above)
+                  if (compression_format_ == "jpeg") {
+                    std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
+                    cv::imencode(".jpg", max_mat, compressed_msg->data, params);
+                  } else if (compression_format_ == "png") {
+                    std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 3};
+                    cv::imencode(".png", max_mat, compressed_msg->data, params);
+                  }
                   
                   m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
                 }
@@ -664,7 +701,7 @@ void ArenaCameraNode::publish_one_image_()
         compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
         compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
         compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-        compressed_msg->format = "jpeg";
+        compressed_msg->format = compression_format_;
         
         Arena::IImage* image_to_compress = nullptr;
         bool need_cleanup = false;
@@ -687,8 +724,13 @@ void ArenaCameraNode::publish_one_image_()
                        cvType,
                        const_cast<void*>(static_cast<const void*>(image_to_compress->GetData())));
         
-        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
-        cv::imencode(".jpg", img_mat, compressed_msg->data, params);
+        if (compression_format_ == "jpeg") {
+          std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
+          cv::imencode(".jpg", img_mat, compressed_msg->data, params);
+        } else if (compression_format_ == "png") {
+          std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 3}; // PNG compression level 0-9
+          cv::imencode(".png", img_mat, compressed_msg->data, params);
+        }
         
         if (need_cleanup) {
           Arena::ImageFactory::Destroy(image_to_compress);
@@ -764,12 +806,18 @@ void ArenaCameraNode::publish_one_image_()
                 compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
                 compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
                 compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                compressed_msg->format = "jpeg";
+                compressed_msg->format = compression_format_;
                 
                 cv::Mat bgr_mat(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3, 
                                const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
-                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
-                cv::imencode(".jpg", bgr_mat, compressed_msg->data, params);
+                
+                if (compression_format_ == "jpeg") {
+                  std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
+                  cv::imencode(".jpg", bgr_mat, compressed_msg->data, params);
+                } else if (compression_format_ == "png") {
+                  std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 3};
+                  cv::imencode(".png", bgr_mat, compressed_msg->data, params);
+                }
                 
                 (*info.compressed_pub)->publish(std::move(compressed_msg));
               }
@@ -820,10 +868,15 @@ void ArenaCameraNode::publish_one_image_()
                 compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
                 compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
                 compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                compressed_msg->format = "jpeg";
+                compressed_msg->format = compression_format_;
                 
-                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
-                cv::imencode(".jpg", max_combined, compressed_msg->data, params);
+                if (compression_format_ == "jpeg") {
+                  std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
+                  cv::imencode(".jpg", max_combined, compressed_msg->data, params);
+                } else if (compression_format_ == "png") {
+                  std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 3};
+                  cv::imencode(".png", max_combined, compressed_msg->data, params);
+                }
                 
                 m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
               }
