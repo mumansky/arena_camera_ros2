@@ -174,6 +174,27 @@ Arena Camera deriver for ROS2 - forked and updated by Mark Umansky
         - `/arena_camera_node/pol_135deg/compressed` - JPEG compressed 135° (if publish_compressed=true)
       - The BGR8 conversion and compression happens automatically for each channel
       
+      ### Trigger Mode with Polarized Cameras
+      
+      **✅ Validated for Task 7 (ENGINEERING_TASKS.md)**
+      
+      Trigger mode is fully supported with polarized cameras. When you trigger an image:
+      - All 4 polarization channels (0°, 45°, 90°, 135°) are captured and published
+      - The max-combined image is generated and published
+      - All images share the same frame ID and timestamp for synchronization
+      
+      For detailed documentation on using trigger mode with polarized cameras, see:
+      **[ros2_ws/src/arena_camera_node/doc/TRIGGER_MODE_POLARIZED.md](ros2_ws/src/arena_camera_node/doc/TRIGGER_MODE_POLARIZED.md)**
+      
+      Quick example:
+      ```bash
+      # Start node in trigger mode with polarized camera
+      ros2 run arena_camera_node start --ros-args -p trigger_mode:=true -p pixelformat:=polarized_angles_0d_45d_90d_135d_bayer_rg8
+      
+      # Trigger an image (publishes to all polarization channels)
+      ros2 run arena_camera_node trigger_image
+      ```
+      
       ## Example Usage
 
         # Simple example with config file (settings loaded from etc/arena_camera/camera.yaml)

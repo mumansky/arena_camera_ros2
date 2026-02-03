@@ -181,6 +181,9 @@ class ArenaCameraNode : public rclcpp::Node
       std::shared_ptr<std_srvs::srv::Trigger::Response> response);
   void msg_form_image_(Arena::IImage* pImage,
                        sensor_msgs::msg::Image& image_msg);
+  
+  // Polarization channel processing
+  void process_and_publish_polarization_channels_(Arena::IImage* pImage);
 
   // Diagnostics
   void produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat);

@@ -718,129 +718,7 @@ void ArenaCameraNode::publish_one_image_()
              " published to " + topic_);
     
     // Extract and publish all polarization channels if format is polarized
-    try {
-      uint64_t pixel_format = pImage->GetPixelFormat();
-      if (pixel_format == 0x8220020F) {
-          std::vector<Arena::IImage*> channels = Arena::ImageFactory::SplitChannels(pImage);
-          
-          if (channels.size() == 4) {
-            struct ChannelInfo {
-              size_t index;
-              std::string name;
-              rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr* raw_pub;
-              rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr* compressed_pub;
-            };
-            
-            std::vector<ChannelInfo> channel_infos = {
-              {0, "0deg", &m_pub_pol_0deg_, &m_pub_pol_0deg_compressed_},
-              {1, "45deg", &m_pub_pol_45deg_, &m_pub_pol_45deg_compressed_},
-              {2, "90deg", &m_pub_pol_90deg_, &m_pub_pol_90deg_compressed_},
-              {3, "135deg", &m_pub_pol_135deg_, &m_pub_pol_135deg_compressed_}
-            };
-            
-            for (const auto& info : channel_infos) {
-              Arena::IImage* bgr_image = Arena::ImageFactory::Convert(channels[info.index], 0x02180015);
-              
-              if (publish_raw_ && *info.raw_pub) {
-                auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
-                pol_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                pol_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                pol_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                pol_msg->height = bgr_image->GetHeight();
-                pol_msg->width = bgr_image->GetWidth();
-                pol_msg->encoding = "bgr8";
-                pol_msg->is_bigendian = 0;
-                pol_msg->step = pol_msg->width * 3;
-                
-                size_t data_size = bgr_image->GetHeight() * bgr_image->GetWidth() * 3;
-                pol_msg->data.resize(data_size);
-                std::memcpy(&pol_msg->data[0], bgr_image->GetData(), data_size);
-                
-                (*info.raw_pub)->publish(std::move(pol_msg));
-              }
-              
-              if (publish_compressed_ && *info.compressed_pub) {
-                auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-                compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                compressed_msg->format = "jpeg";
-                
-                cv::Mat bgr_mat(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3, 
-                               const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
-                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
-                cv::imencode(".jpg", bgr_mat, compressed_msg->data, params);
-                
-                (*info.compressed_pub)->publish(std::move(compressed_msg));
-              }
-              
-              Arena::ImageFactory::Destroy(bgr_image);
-            }
-            
-            // Create max-combined image
-            if ((publish_raw_ && m_pub_pol_max_) || (publish_compressed_ && m_pub_pol_max_compressed_)) {
-              std::vector<Arena::IImage*> bgr_channels;
-              for (size_t i = 0; i < 4; i++) {
-                bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], 0x02180015));
-              }
-              
-              size_t height = bgr_channels[0]->GetHeight();
-              size_t width = bgr_channels[0]->GetWidth();
-              
-              cv::Mat mat0(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[0]->GetData())));
-              cv::Mat mat1(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[1]->GetData())));
-              cv::Mat mat2(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[2]->GetData())));
-              cv::Mat mat3(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[3]->GetData())));
-              
-              cv::Mat max01, max23, max_combined;
-              cv::max(mat0, mat1, max01);
-              cv::max(mat2, mat3, max23);
-              cv::max(max01, max23, max_combined);
-              
-              if (publish_raw_ && m_pub_pol_max_) {
-                auto max_msg = std::make_unique<sensor_msgs::msg::Image>();
-                max_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                max_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                max_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                max_msg->height = height;
-                max_msg->width = width;
-                max_msg->encoding = "bgr8";
-                max_msg->is_bigendian = 0;
-                max_msg->step = width * 3;
-                
-                size_t data_size = height * width * 3;
-                max_msg->data.resize(data_size);
-                std::memcpy(&max_msg->data[0], max_combined.data, data_size);
-                
-                m_pub_pol_max_->publish(std::move(max_msg));
-              }
-              
-              if (publish_compressed_ && m_pub_pol_max_compressed_) {
-                auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-                compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                compressed_msg->format = "jpeg";
-                
-                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
-                cv::imencode(".jpg", max_combined, compressed_msg->data, params);
-                
-                m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
-              }
-              
-              for (auto* ch : bgr_channels) {
-                Arena::ImageFactory::Destroy(ch);
-              }
-            }
-            
-            for (auto* ch : channels) {
-              Arena::ImageFactory::Destroy(ch);
-            }
-          }
-      }
-    } catch (std::exception& e) {
-      log_warn(std::string("Error extracting polarization channels: ") + e.what());
-    }
+    process_and_publish_polarization_channels_(pImage);
     
     this->m_pDevice->RequeueBuffer(pImage);
 
@@ -922,6 +800,151 @@ void ArenaCameraNode::msg_form_image_(Arena::IImage* pImage,
   }
 }
 
+/**
+ * @brief Process and publish all polarization channels for a polarized image
+ * 
+ * This function extracts and publishes all 4 polarization channels (0°, 45°, 90°, 135°)
+ * and generates the max-combined image for polarized camera formats.
+ * 
+ * This function is called by both:
+ * - publish_one_image_() for continuous acquisition mode
+ * - publish_an_image_on_trigger_() for trigger mode
+ * 
+ * @param pImage Pointer to the Arena SDK image (must be polarized format 0x8220020F)
+ */
+void ArenaCameraNode::process_and_publish_polarization_channels_(Arena::IImage* pImage)
+{
+  try {
+    uint64_t pixel_format = pImage->GetPixelFormat();
+    // 0x8220020F is the polarized format: polarized_angles_0d_45d_90d_135d_bayer_rg8
+    if (pixel_format == 0x8220020F) {
+      std::vector<Arena::IImage*> channels = Arena::ImageFactory::SplitChannels(pImage);
+      
+      if (channels.size() == 4) {
+        struct ChannelInfo {
+          size_t index;
+          std::string name;
+          rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr* raw_pub;
+          rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr* compressed_pub;
+        };
+        
+        std::vector<ChannelInfo> channel_infos = {
+          {0, "0deg", &m_pub_pol_0deg_, &m_pub_pol_0deg_compressed_},
+          {1, "45deg", &m_pub_pol_45deg_, &m_pub_pol_45deg_compressed_},
+          {2, "90deg", &m_pub_pol_90deg_, &m_pub_pol_90deg_compressed_},
+          {3, "135deg", &m_pub_pol_135deg_, &m_pub_pol_135deg_compressed_}
+        };
+        
+        // Publish each polarization channel
+        for (const auto& info : channel_infos) {
+          // Convert channel to BGR8 format (0x02180015)
+          Arena::IImage* bgr_image = Arena::ImageFactory::Convert(channels[info.index], 0x02180015);
+          
+          // Publish raw image if enabled
+          if (publish_raw_ && *info.raw_pub) {
+            auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
+            pol_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
+            pol_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
+            pol_msg->header.frame_id = std::to_string(pImage->GetFrameId());
+            pol_msg->height = bgr_image->GetHeight();
+            pol_msg->width = bgr_image->GetWidth();
+            pol_msg->encoding = "bgr8";
+            pol_msg->is_bigendian = 0;
+            pol_msg->step = pol_msg->width * 3;
+            
+            size_t data_size = bgr_image->GetHeight() * bgr_image->GetWidth() * 3;
+            pol_msg->data.resize(data_size);
+            std::memcpy(&pol_msg->data[0], bgr_image->GetData(), data_size);
+            
+            (*info.raw_pub)->publish(std::move(pol_msg));
+          }
+          
+          // Publish compressed image if enabled
+          if (publish_compressed_ && *info.compressed_pub) {
+            auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+            compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
+            compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
+            compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
+            compressed_msg->format = "jpeg";
+            
+            cv::Mat bgr_mat(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3, 
+                           const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
+            std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
+            cv::imencode(".jpg", bgr_mat, compressed_msg->data, params);
+            
+            (*info.compressed_pub)->publish(std::move(compressed_msg));
+          }
+          
+          Arena::ImageFactory::Destroy(bgr_image);
+        }
+        
+        // Create and publish max-combined image (element-wise maximum of all 4 channels)
+        if ((publish_raw_ && m_pub_pol_max_) || (publish_compressed_ && m_pub_pol_max_compressed_)) {
+          std::vector<Arena::IImage*> bgr_channels;
+          for (size_t i = 0; i < 4; i++) {
+            bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], 0x02180015));
+          }
+          
+          size_t height = bgr_channels[0]->GetHeight();
+          size_t width = bgr_channels[0]->GetWidth();
+          
+          cv::Mat mat0(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[0]->GetData())));
+          cv::Mat mat1(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[1]->GetData())));
+          cv::Mat mat2(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[2]->GetData())));
+          cv::Mat mat3(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[3]->GetData())));
+          
+          cv::Mat max01, max23, max_combined;
+          cv::max(mat0, mat1, max01);
+          cv::max(mat2, mat3, max23);
+          cv::max(max01, max23, max_combined);
+          
+          if (publish_raw_ && m_pub_pol_max_) {
+            auto max_msg = std::make_unique<sensor_msgs::msg::Image>();
+            max_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
+            max_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
+            max_msg->header.frame_id = std::to_string(pImage->GetFrameId());
+            max_msg->height = height;
+            max_msg->width = width;
+            max_msg->encoding = "bgr8";
+            max_msg->is_bigendian = 0;
+            max_msg->step = width * 3;
+            
+            size_t data_size = height * width * 3;
+            max_msg->data.resize(data_size);
+            std::memcpy(&max_msg->data[0], max_combined.data, data_size);
+            
+            m_pub_pol_max_->publish(std::move(max_msg));
+          }
+          
+          if (publish_compressed_ && m_pub_pol_max_compressed_) {
+            auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+            compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
+            compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
+            compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
+            compressed_msg->format = "jpeg";
+            
+            std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
+            cv::imencode(".jpg", max_combined, compressed_msg->data, params);
+            
+            m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
+          }
+          
+          for (auto* ch : bgr_channels) {
+            Arena::ImageFactory::Destroy(ch);
+          }
+        }
+        
+        // Clean up channel images
+        for (auto* ch : channels) {
+          Arena::ImageFactory::Destroy(ch);
+        }
+      }
+    }
+  } catch (std::exception& e) {
+    log_warn(std::string("Error extracting polarization channels: ") + e.what());
+  }
+}
+
 void ArenaCameraNode::publish_an_image_on_trigger_(
     std::shared_ptr<std_srvs::srv::Trigger::Request> request /*unused*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
@@ -985,6 +1008,11 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     response->success = true;
 
     log_debug(msg);
+    
+    // Process and publish polarization channels if format is polarized
+    // This ensures trigger mode works correctly with polarized cameras
+    process_and_publish_polarization_channels_(pImage);
+    
     this->m_pDevice->RequeueBuffer(pImage);
 
   }

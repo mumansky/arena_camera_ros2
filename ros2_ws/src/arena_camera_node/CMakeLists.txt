@@ -254,6 +254,21 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_qos_translation
     rclcpp
   )
+
+  # Trigger mode with polarization integration tests
+  # Note: This is an integration test that requires a polarized camera
+  # and the arena_camera_node to be running with trigger_mode:=true
+  ament_add_gtest(test_trigger_polarized
+    test/test_trigger_polarized.cpp
+  )
+  target_include_directories(test_trigger_polarized PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  ament_target_dependencies(test_trigger_polarized
+    rclcpp
+    sensor_msgs
+    std_srvs
+  )
 endif()
 
 ament_package()
