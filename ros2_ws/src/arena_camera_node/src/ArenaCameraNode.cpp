@@ -644,11 +644,12 @@ void ArenaCameraNode::publish_one_image_()
   bool expected = false;
   if (!m_is_processing_.compare_exchange_strong(expected, true)) {
     // Already processing - skip this frame to prevent backpressure
-    m_frames_skipped_++;
-    m_backpressure_events_++;
-    if (m_frames_skipped_ % 100 == 1) {  // Log every 100 skipped frames to avoid log spam
-      log_warn("Backpressure detected: skipped " + std::to_string(m_frames_skipped_) + 
-               " frames. Processing time (" + std::to_string(m_last_processing_time_ms_) + 
+    m_frames_skipped_.fetch_add(1, std::memory_order_relaxed);
+    m_backpressure_events_.fetch_add(1, std::memory_order_relaxed);
+    uint64_t skipped = m_frames_skipped_.load(std::memory_order_relaxed);
+    if (skipped % 100 == 0) {  // Log every 100 skipped frames to avoid log spam
+      log_warn("Backpressure detected: skipped " + std::to_string(skipped) + 
+               " frames. Processing time (" + std::to_string(m_last_processing_time_ms_.load(std::memory_order_relaxed)) + 
                "ms) exceeds timer interval.");
     }
     return;
@@ -866,28 +867,34 @@ void ArenaCameraNode::publish_one_image_()
     
     // Update processing time statistics
     auto processing_end = std::chrono::steady_clock::now();
-    m_last_processing_time_ms_ = std::chrono::duration<double, std::milli>(
+    double processing_time = std::chrono::duration<double, std::milli>(
         processing_end - processing_start).count();
+    m_last_processing_time_ms_.store(processing_time, std::memory_order_relaxed);
     
-    // Update max processing time
-    if (m_last_processing_time_ms_ > m_max_processing_time_ms_) {
-      m_max_processing_time_ms_ = m_last_processing_time_ms_;
+    // Update max processing time (compare-and-swap loop for thread safety)
+    double current_max = m_max_processing_time_ms_.load(std::memory_order_relaxed);
+    while (processing_time > current_max) {
+      if (m_max_processing_time_ms_.compare_exchange_weak(current_max, processing_time, std::memory_order_relaxed)) {
+        break;
+      }
     }
     
     // Update running average (exponential moving average with alpha=0.1)
-    if (m_processing_time_samples_ == 0) {
-      m_avg_processing_time_ms_ = m_last_processing_time_ms_;
+    uint64_t samples = m_processing_time_samples_.load(std::memory_order_relaxed);
+    if (samples == 0) {
+      m_avg_processing_time_ms_.store(processing_time, std::memory_order_relaxed);
     } else {
-      m_avg_processing_time_ms_ = 0.9 * m_avg_processing_time_ms_ + 0.1 * m_last_processing_time_ms_;
+      double current_avg = m_avg_processing_time_ms_.load(std::memory_order_relaxed);
+      m_avg_processing_time_ms_.store(0.9 * current_avg + 0.1 * processing_time, std::memory_order_relaxed);
     }
-    m_processing_time_samples_++;
+    samples = m_processing_time_samples_.fetch_add(1, std::memory_order_relaxed) + 1;
     
     // Warn if processing time exceeds recommended threshold (timer interval is 1ms)
     // This helps identify when the timer interval is too aggressive
-    if (m_last_processing_time_ms_ > 5.0 && m_processing_time_samples_ % 100 == 1) {
-      log_debug("Image processing took " + std::to_string(m_last_processing_time_ms_) + 
-               "ms (avg: " + std::to_string(m_avg_processing_time_ms_) + 
-               "ms, max: " + std::to_string(m_max_processing_time_ms_) + "ms)");
+    if (processing_time > 5.0 && samples % 100 == 0) {
+      log_debug("Image processing took " + std::to_string(processing_time) + 
+               "ms (avg: " + std::to_string(m_avg_processing_time_ms_.load(std::memory_order_relaxed)) + 
+               "ms, max: " + std::to_string(m_max_processing_time_ms_.load(std::memory_order_relaxed)) + "ms)");
     }
 
   } catch (GenICam::TimeoutException& e) {
@@ -1502,7 +1509,7 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
     if (m_image_publish_errors_ > 0) {
       stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN,
                    "Camera connected with errors");
-    } else if (m_backpressure_events_ > 0) {
+    } else if (m_backpressure_events_.load(std::memory_order_relaxed) > 0) {
       stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN,
                    "Camera operating with backpressure (frames skipped)");
     } else {
@@ -1522,12 +1529,12 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
   stat.add("Topic", topic_);
   
   // Backpressure monitoring metrics (Task 4: Timer Backpressure Risk)
-  stat.add("Frames Skipped (Backpressure)", std::to_string(m_frames_skipped_));
-  stat.add("Backpressure Events", std::to_string(m_backpressure_events_));
-  stat.add("Last Processing Time (ms)", std::to_string(m_last_processing_time_ms_));
-  stat.add("Avg Processing Time (ms)", std::to_string(m_avg_processing_time_ms_));
-  stat.add("Max Processing Time (ms)", std::to_string(m_max_processing_time_ms_));
-  stat.add("Processing Time Samples", std::to_string(m_processing_time_samples_));
+  stat.add("Frames Skipped (Backpressure)", std::to_string(m_frames_skipped_.load(std::memory_order_relaxed)));
+  stat.add("Backpressure Events", std::to_string(m_backpressure_events_.load(std::memory_order_relaxed)));
+  stat.add("Last Processing Time (ms)", std::to_string(m_last_processing_time_ms_.load(std::memory_order_relaxed)));
+  stat.add("Avg Processing Time (ms)", std::to_string(m_avg_processing_time_ms_.load(std::memory_order_relaxed)));
+  stat.add("Max Processing Time (ms)", std::to_string(m_max_processing_time_ms_.load(std::memory_order_relaxed)));
+  stat.add("Processing Time Samples", std::to_string(m_processing_time_samples_.load(std::memory_order_relaxed)));
 
   if (m_device_connected_) {
     stat.add("Serial", serial_.empty() ? "first discovered" : serial_);

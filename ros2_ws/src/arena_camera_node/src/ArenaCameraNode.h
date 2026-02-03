@@ -92,13 +92,14 @@ class ArenaCameraNode : public rclcpp::Node
   double m_calculated_fps_;
 
   // Backpressure monitoring (Task 4: Timer Backpressure Risk)
-  std::atomic<bool> m_is_processing_;  // Flag to detect callback re-entry
-  uint64_t m_frames_skipped_;          // Frames skipped due to backpressure
-  uint64_t m_backpressure_events_;     // Total backpressure events (processing took too long)
-  double m_last_processing_time_ms_;   // Last image processing time in milliseconds
-  double m_max_processing_time_ms_;    // Maximum processing time observed
-  double m_avg_processing_time_ms_;    // Running average processing time
-  uint64_t m_processing_time_samples_; // Number of samples for average calculation
+  // These atomics ensure thread-safe access between timer callback and diagnostics callback
+  std::atomic<bool> m_is_processing_;           // Flag to detect callback re-entry
+  std::atomic<uint64_t> m_frames_skipped_;      // Frames skipped due to backpressure
+  std::atomic<uint64_t> m_backpressure_events_; // Total backpressure events (processing took too long)
+  std::atomic<double> m_last_processing_time_ms_;   // Last image processing time in milliseconds
+  std::atomic<double> m_max_processing_time_ms_;    // Maximum processing time observed
+  std::atomic<double> m_avg_processing_time_ms_;    // Running average processing time
+  std::atomic<uint64_t> m_processing_time_samples_; // Number of samples for average calculation
 
   std::string serial_;
   bool is_passed_serial_;
