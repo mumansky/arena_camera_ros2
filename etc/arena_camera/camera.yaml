@@ -109,10 +109,13 @@
     # Default: "jpeg"
     compression_format: "jpeg"
     
-    # JPEG compression quality (1-100)
-    # Higher values = better quality but larger file sizes
-    # Typical values: 60-80 (good quality/size balance), 85-95 (high quality), 100 (maximum quality)
-    # Only used when compression_format is "jpeg"
+    # Compression quality (1-100)
+    # For JPEG: Higher values = better image quality but larger file sizes
+    #   - Typical values: 60-80 (good quality/size balance), 85-95 (high quality), 100 (maximum quality)
+    # For PNG: Higher values = faster encoding but larger files (inversely mapped to PNG compression level 0-9)
+    #   - 100 = fastest encoding, largest files (PNG level 0)
+    #   - 1 = slowest encoding, smallest files (PNG level 9)
+    #   - Typical value: 50-70 for balanced PNG compression
     # Default: 90
     compression_quality: 90
 

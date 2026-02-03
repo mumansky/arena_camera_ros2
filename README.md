@@ -144,15 +144,17 @@ Arena Camera deriver for ROS2 - forked and updated by Mark Umansky
           - use PNG when you need bit-perfect images (e.g., for calibration or precision measurements).
         
         - compression_quality
-          - JPEG compression quality (1-100).
+          - compression quality (1-100).
           - default value is 90.
-          - higher values = better quality but larger file sizes.
-          - only used when compression_format is "jpeg".
-          - **Typical values:**
+          - **For JPEG**: higher values = better image quality but larger file sizes.
             - 60-80: Good quality/size balance for general use
             - 85-95: High quality, suitable for detailed scenes
             - 100: Maximum quality (near-lossless), large files
-          - recommended: start with 90 and adjust based on your bandwidth and quality needs.
+          - **For PNG**: higher values = faster encoding but larger files (inversely mapped to PNG compression level 0-9).
+            - 100: Fastest encoding, largest files
+            - 50-70: Balanced PNG compression (recommended)
+            - 1: Slowest encoding, smallest files
+          - recommended: start with 90 for JPEG and adjust based on your bandwidth and quality needs.
        
       - QoS related parameters
         - if using these images with some subscriber make sure: 

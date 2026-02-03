@@ -469,7 +469,11 @@ void ArenaCameraNode::publish_images_()
             std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
             cv::imencode(".jpg", img_mat, compressed_msg->data, params);
           } else if (compression_format_ == "png") {
-            std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 3};
+            // Map compression_quality (1-100) to PNG compression level (0-9)
+            // Higher quality = lower compression level (faster encoding)
+            // 100 -> 0 (no compression, fastest), 1 -> 9 (max compression, slowest)
+            int png_level = 9 - ((compression_quality_ - 1) * 9 / 99);
+            std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, png_level};
             cv::imencode(".png", img_mat, compressed_msg->data, params);
           }
           
@@ -564,7 +568,9 @@ void ArenaCameraNode::publish_images_()
                     std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
                     cv::imencode(".jpg", bgr_mat, compressed_msg->data, params);
                   } else if (compression_format_ == "png") {
-                    std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 3};
+                    // Map compression_quality (1-100) to PNG compression level (0-9)
+                    int png_level = 9 - ((compression_quality_ - 1) * 9 / 99);
+                    std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, png_level};
                     cv::imencode(".png", bgr_mat, compressed_msg->data, params);
                   }
                   
@@ -628,7 +634,9 @@ void ArenaCameraNode::publish_images_()
                     std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
                     cv::imencode(".jpg", max_mat, compressed_msg->data, params);
                   } else if (compression_format_ == "png") {
-                    std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 3};
+                    // Map compression_quality (1-100) to PNG compression level (0-9)
+                    int png_level = 9 - ((compression_quality_ - 1) * 9 / 99);
+                    std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, png_level};
                     cv::imencode(".png", max_mat, compressed_msg->data, params);
                   }
                   
@@ -728,7 +736,9 @@ void ArenaCameraNode::publish_one_image_()
           std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
           cv::imencode(".jpg", img_mat, compressed_msg->data, params);
         } else if (compression_format_ == "png") {
-          std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 3}; // PNG compression level 0-9
+          // Map compression_quality (1-100) to PNG compression level (0-9)
+          int png_level = 9 - ((compression_quality_ - 1) * 9 / 99);
+          std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, png_level};
           cv::imencode(".png", img_mat, compressed_msg->data, params);
         }
         
@@ -815,7 +825,9 @@ void ArenaCameraNode::publish_one_image_()
                   std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
                   cv::imencode(".jpg", bgr_mat, compressed_msg->data, params);
                 } else if (compression_format_ == "png") {
-                  std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 3};
+                  // Map compression_quality (1-100) to PNG compression level (0-9)
+                  int png_level = 9 - ((compression_quality_ - 1) * 9 / 99);
+                  std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, png_level};
                   cv::imencode(".png", bgr_mat, compressed_msg->data, params);
                 }
                 
@@ -874,7 +886,9 @@ void ArenaCameraNode::publish_one_image_()
                   std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
                   cv::imencode(".jpg", max_combined, compressed_msg->data, params);
                 } else if (compression_format_ == "png") {
-                  std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 3};
+                  // Map compression_quality (1-100) to PNG compression level (0-9)
+                  int png_level = 9 - ((compression_quality_ - 1) * 9 / 99);
+                  std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, png_level};
                   cv::imencode(".png", max_combined, compressed_msg->data, params);
                 }
                 
