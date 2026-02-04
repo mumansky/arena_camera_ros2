@@ -10,7 +10,7 @@
 //
 
 // std
-#include <atomic>      // std::atomic for thread-safe backpressure flag
+#include <atomic>      // std::atomic for thread-safe flags (streaming state, backpressure)
 #include <chrono>      //chrono_literals
 #include <functional>  // std::bind , std::placeholders
 
@@ -31,7 +31,8 @@ class ArenaCameraNode : public rclcpp::Node
   ArenaCameraNode() : Node("arena_camera_node"),
     m_images_published_(0),
     m_image_publish_errors_(0),
-    m_device_connected_(false)
+    m_device_connected_(false),
+    m_is_streaming_(false)
   {
     // set stdout buffer size for ROS defined size BUFSIZE
     setvbuf(stdout, NULL, _IONBF, BUFSIZ);
@@ -46,6 +47,75 @@ class ArenaCameraNode : public rclcpp::Node
   ~ArenaCameraNode()
   {
     log_info(std::string("Destroying \"") + this->get_name() + "\" node");
+    
+    // Capture streaming state before setting to false.
+    // Note: There's a small race window between this capture and the store below,
+    // but any callback that starts in this window will see m_is_streaming_=false
+    // before accessing m_pDevice, which is the critical safety property.
+    bool was_streaming = m_is_streaming_.load();
+    
+    // Set streaming flag to false FIRST to signal any in-flight callbacks to exit early
+    // This prevents race conditions where a callback tries to use m_pDevice during cleanup
+    m_is_streaming_.store(false);
+    
+    // Cancel the image acquisition timer to stop new callbacks
+    if (m_image_acquisition_timer_) {
+      m_image_acquisition_timer_->cancel();
+      m_image_acquisition_timer_.reset();
+      log_info("Image acquisition timer cancelled");
+    }
+    
+    // Cancel the wait for device timer
+    if (m_wait_for_device_timer_callback_) {
+      m_wait_for_device_timer_callback_->cancel();
+      m_wait_for_device_timer_callback_.reset();
+      log_info("Device timer cancelled");
+    }
+    
+    // Stop streaming on device if it was streaming
+    if (m_pDevice && was_streaming) {
+      try {
+        m_pDevice->StopStream();
+        log_info("Camera stream stopped");
+      } catch (const std::exception& e) {
+        log_warn(std::string("Warning during stream stop: ") + e.what());
+      } catch (...) {
+        log_warn("Unknown exception during stream stop");
+      }
+    }
+    
+    // Destroy device before system (order matters)
+    // Extract raw pointer, call cleanup, then release shared_ptr
+    // The deleters are no-op so we handle cleanup explicitly here
+    if (m_pDevice && m_pSystem) {
+      try {
+        Arena::IDevice* pDevice = m_pDevice.get();
+        m_pSystem->DestroyDevice(pDevice);
+        log_info("Device is destroyed");
+      } catch (const std::exception& e) {
+        log_warn(std::string("Warning during device cleanup: ") + e.what());
+      } catch (...) {
+        log_warn("Unknown exception during device cleanup");
+      }
+      m_pDevice.reset();  // Release shared_ptr (deleter is no-op)
+    }
+    
+    // Close system
+    if (m_pSystem) {
+      try {
+        Arena::ISystem* pSystem = m_pSystem.get();
+        Arena::CloseSystem(pSystem);
+        log_info("System is destroyed");
+      } catch (const std::exception& e) {
+        log_warn(std::string("Warning during system cleanup: ") + e.what());
+      } catch (...) {
+        log_warn("Unknown exception during system cleanup");
+      }
+      m_pSystem.reset();  // Release shared_ptr (deleter is no-op)
+    }
+    
+    m_device_connected_ = false;
+    log_info(std::string("Destroyed \"") + this->get_name() + "\" node");
   }
 
   void log_debug(std::string msg) { RCLCPP_DEBUG(this->get_logger(), msg.c_str()); };
@@ -78,6 +148,9 @@ class ArenaCameraNode : public rclcpp::Node
   uint64_t m_images_published_;
   uint64_t m_image_publish_errors_;
   bool m_device_connected_;
+  
+  // Streaming state for proper cleanup (atomic for thread safety between destructor and deleters)
+  std::atomic<bool> m_is_streaming_;
   
   // FPS calculation
   std::chrono::steady_clock::time_point m_fps_last_time_;
