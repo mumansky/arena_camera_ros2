@@ -75,16 +75,34 @@ class ArenaCameraNode : public rclcpp::Node
       }
     }
     
-    // Reset device first, then system (order matters for proper cleanup)
-    // The shared_ptr deleters will handle DestroyDevice and CloseSystem
-    if (m_pDevice) {
-      m_pDevice.reset();
-      log_info("Device resources released");
+    // Destroy device before system (order matters)
+    // Extract raw pointer, call cleanup, then release shared_ptr
+    // The deleters are no-op so we handle cleanup explicitly here
+    if (m_pDevice && m_pSystem) {
+      try {
+        Arena::IDevice* pDevice = m_pDevice.get();
+        m_pSystem->DestroyDevice(pDevice);
+        log_info("Device is destroyed");
+      } catch (const std::exception& e) {
+        log_warn(std::string("Warning during device cleanup: ") + e.what());
+      } catch (...) {
+        log_warn("Unknown exception during device cleanup");
+      }
+      m_pDevice.reset();  // Release shared_ptr (deleter is no-op)
     }
     
+    // Close system
     if (m_pSystem) {
-      m_pSystem.reset();
-      log_info("System resources released");
+      try {
+        Arena::ISystem* pSystem = m_pSystem.get();
+        Arena::CloseSystem(pSystem);
+        log_info("System is destroyed");
+      } catch (const std::exception& e) {
+        log_warn(std::string("Warning during system cleanup: ") + e.what());
+      } catch (...) {
+        log_warn("Unknown exception during system cleanup");
+      }
+      m_pSystem.reset();  // Release shared_ptr (deleter is no-op)
     }
     
     m_device_connected_ = false;
