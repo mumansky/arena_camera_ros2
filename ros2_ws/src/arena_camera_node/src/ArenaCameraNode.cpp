@@ -149,6 +149,8 @@ void ArenaCameraNode::parse_parameters_()
                    m_config_params_["publish_raw"].as<bool>() : true;
     publish_compressed_ = (m_config_params_ && m_config_params_["publish_compressed"]) ?
                           m_config_params_["publish_compressed"].as<bool>() : false;
+    jpeg_quality_ = (m_config_params_ && m_config_params_["jpeg_quality"]) ?
+                    m_config_params_["jpeg_quality"].as<int>() : 80;
 
   } catch (rclcpp::ParameterTypeException& e) {
     log_err("Parameter exception for: " + nextParameterToDeclare + " - " + std::string(e.what()));
@@ -374,11 +376,10 @@ void ArenaCameraNode::run_()
   m_device_connected_ = true;
 
   if (!trigger_mode_activated_) {
-    log_info("Streaming started - publishing images to " + topic_);
-    // Use a timer for non-blocking image acquisition (1ms interval for high-speed capture)
-    using namespace std::chrono_literals;
-    m_image_acquisition_timer_ = this->create_wall_timer(
-        1ms, std::bind(&ArenaCameraNode::publish_one_image_, this));
+    log_info("Streaming started with event-driven callbacks - publishing images to " + topic_);
+    // Register callback handler for event-driven image acquisition
+    m_image_callback_handler_ = std::make_unique<ImageCallbackHandler>(this);
+    m_pDevice->RegisterImageCallback(m_image_callback_handler_.get());
   } else {
     log_info("Trigger mode enabled - waiting for trigger service calls");
   }
@@ -626,9 +627,9 @@ void ArenaCameraNode::publish_images_()
   };
 }
 
-void ArenaCameraNode::publish_one_image_()
+void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
 {
-  // Non-blocking single image acquisition callback for timer-based streaming
+  // Event-driven image handler called by ArenaSDK when new image arrives
   
   // Check if device is still valid and streaming (protects against race with destructor)
   if (!m_pDevice || !m_is_streaming_.load()) {
@@ -637,7 +638,7 @@ void ArenaCameraNode::publish_one_image_()
   }
   
   // Backpressure detection: Skip this callback if still processing previous image
-  // This prevents queue buildup when image processing takes longer than timer interval
+  // This prevents queue buildup when image processing takes longer than frame arrival
   bool expected = false;
   if (!m_processing_image_.compare_exchange_strong(expected, true)) {
     // Still processing previous image - skip this frame
@@ -662,13 +663,10 @@ void ArenaCameraNode::publish_one_image_()
   // Measure processing time
   auto processing_start = std::chrono::steady_clock::now();
   
-  Arena::IImage* pImage = nullptr;
-  
   try {
-    // Use a short timeout since we're being called frequently by timer
-    pImage = m_pDevice->GetImage(100);  // 100ms timeout
+    // Image is provided by callback - no GetImage() call needed
     if (!pImage) {
-      return;  // No image available, will try again on next timer callback
+      return;
     }
     
     // Publish raw image if enabled
@@ -712,7 +710,7 @@ void ArenaCameraNode::publish_one_image_()
                        cvType,
                        const_cast<void*>(static_cast<const void*>(image_to_compress->GetData())));
         
-        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
+        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
         cv::imencode(".jpg", img_mat, compressed_msg->data, params);
         
         // converted_image is automatically destroyed by RAII when going out of scope
@@ -795,7 +793,7 @@ void ArenaCameraNode::publish_one_image_()
                 
                 cv::Mat bgr_mat(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3, 
                                const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
-                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
+                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
                 cv::imencode(".jpg", bgr_mat, compressed_msg->data, params);
                 
                 (*info.compressed_pub)->publish(std::move(compressed_msg));
@@ -850,7 +848,7 @@ void ArenaCameraNode::publish_one_image_()
                 compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
                 compressed_msg->format = "jpeg";
                 
-                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
+                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
                 cv::imencode(".jpg", max_combined, compressed_msg->data, params);
                 
                 m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
@@ -866,7 +864,8 @@ void ArenaCameraNode::publish_one_image_()
       log_warn(std::string("Error extracting polarization channels: ") + e.what());
     }
     
-    this->m_pDevice->RequeueBuffer(pImage);
+    // Note: With callback-based acquisition, ArenaSDK manages the image lifecycle
+    // No manual RequeueBuffer needed - image is automatically returned when callback exits
     
     // Calculate and store processing time
     auto processing_end = std::chrono::steady_clock::now();
@@ -882,19 +881,11 @@ void ArenaCameraNode::publish_one_image_()
     m_total_processing_time_ms_ += m_last_processing_time_ms_;
     m_processing_time_samples_++;
 
-  } catch (GenICam::TimeoutException& e) {
-    // Timeout is normal when camera is slow or no new frame available
-    // Just return and wait for next timer callback
-    // Note: processing_guard RAII will automatically reset m_processing_image_ flag
-    return;
   } catch (std::exception& e) {
     m_image_publish_errors_++;
-    if (pImage) {
-      this->m_pDevice->RequeueBuffer(pImage);
-      pImage = nullptr;
-      log_err(std::string("Exception occurred while publishing an image: ") + e.what());
-    }
-    // Note: processing_guard RAII will automatically reset m_processing_image_ flag
+    log_err(std::string("Exception occurred while publishing an image: ") + e.what());
+    // Note: With callbacks, image is automatically returned by ArenaSDK when callback exits
+    // processing_guard RAII will automatically reset m_processing_image_ flag
     return;
   }
   // Note: processing_guard RAII will automatically reset m_processing_image_ flag on exit

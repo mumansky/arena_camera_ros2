@@ -27,6 +27,10 @@
 
 class ArenaCameraNode : public rclcpp::Node
 {
+ private:
+  // Forward declaration for image callback handler
+  class ImageCallbackHandler;
+  
  public:
   ArenaCameraNode() : Node("arena_camera_node"),
     m_images_published_(0),
@@ -58,11 +62,15 @@ class ArenaCameraNode : public rclcpp::Node
     // This prevents race conditions where a callback tries to use m_pDevice during cleanup
     m_is_streaming_.store(false);
     
-    // Cancel the image acquisition timer to stop new callbacks
-    if (m_image_acquisition_timer_) {
-      m_image_acquisition_timer_->cancel();
-      m_image_acquisition_timer_.reset();
-      log_info("Image acquisition timer cancelled");
+    // Deregister image callback before stopping stream
+    if (m_image_callback_handler_ && m_pDevice) {
+      try {
+        m_pDevice->DeregisterImageCallback(m_image_callback_handler_.get());
+        m_image_callback_handler_.reset();
+        log_info("Image callback deregistered");
+      } catch (const std::exception& e) {
+        log_warn(std::string("Warning during callback deregistration: ") + e.what());
+      }
     }
     
     // Cancel the wait for device timer
@@ -124,6 +132,25 @@ class ArenaCameraNode : public rclcpp::Node
   void log_err(std::string msg) { RCLCPP_ERROR(this->get_logger(), msg.c_str()); };
 
  private:
+  // Image callback handler class for ArenaSDK event-driven acquisition
+  class ImageCallbackHandler : public Arena::IImageCallback
+  {
+  public:
+    explicit ImageCallbackHandler(ArenaCameraNode* node) : m_node_(node) {}
+    
+    void OnImage(Arena::IImage* pImage) override
+    {
+      if (m_node_) {
+        m_node_->handle_camera_image_(pImage);
+      }
+    }
+    
+  private:
+    ArenaCameraNode* m_node_;
+  };
+  
+  // Image handler called by ArenaSDK callback
+  void handle_camera_image_(Arena::IImage* pImage);
   std::shared_ptr<Arena::ISystem> m_pSystem;
   std::shared_ptr<Arena::IDevice> m_pDevice;
 
@@ -140,8 +167,10 @@ class ArenaCameraNode : public rclcpp::Node
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_pol_max_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_pol_max_compressed_;
   rclcpp::TimerBase::SharedPtr m_wait_for_device_timer_callback_;
-  rclcpp::TimerBase::SharedPtr m_image_acquisition_timer_;  // Timer for non-blocking image acquisition
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr m_trigger_an_image_srv_;
+  
+  // Image callback handler for event-driven acquisition
+  std::unique_ptr<ImageCallbackHandler> m_image_callback_handler_;
 
   // Diagnostics
   std::unique_ptr<diagnostic_updater::Updater> m_diagnostic_updater_;
@@ -233,6 +262,8 @@ class ArenaCameraNode : public rclcpp::Node
 
   bool publish_raw_;
   bool publish_compressed_;
+  
+  int jpeg_quality_;  // JPEG compression quality (1-100, default 80)
 
   YAML::Node m_config_params_;
 
@@ -256,7 +287,6 @@ class ArenaCameraNode : public rclcpp::Node
   void set_nodes_trigger_mode_();
   void set_nodes_test_pattern_image_();
   void publish_images_();  // Legacy blocking implementation
-  void publish_one_image_();  // Non-blocking timer callback for image acquisition
 
   void publish_an_image_on_trigger_(
       std::shared_ptr<std_srvs::srv::Trigger::Request> request,
