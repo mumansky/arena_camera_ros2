@@ -16,6 +16,7 @@
 
 // ArenaSDK
 #include "ArenaCameraNode.h"
+#include "arena_image_raii.h"
 #include "light_arena/deviceinfo_helper.h"
 #include "rclcpp_adapter/pixelformat_translation.h"
 #include "rclcpp_adapter/quilty_of_service_translation.cpp"
@@ -415,18 +416,19 @@ void ArenaCameraNode::publish_images_()
           compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
           compressed_msg->format = "jpeg";
           
+          // Use RAII for converted image to ensure cleanup on exception
+          arena_camera::ArenaImagePtr converted_image;
           Arena::IImage* image_to_compress = nullptr;
-          bool need_cleanup = false;
           
           // Try to convert to BGR8 for compression compatibility
           try {
-            image_to_compress = Arena::ImageFactory::Convert(pImage, 0x02180015); // PFNC_BGR8
-            need_cleanup = true;
+            converted_image = arena_camera::make_arena_image_ptr(
+                Arena::ImageFactory::Convert(pImage, 0x02180015)); // PFNC_BGR8
+            image_to_compress = converted_image.get();
           } catch (...) {
             // If conversion fails, try the original format
             // This handles cases where the image is already in a JPEG-compatible format
             image_to_compress = pImage;
-            need_cleanup = false;
           }
           
           // Create cv::Mat and compress
@@ -443,9 +445,7 @@ void ArenaCameraNode::publish_images_()
           std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
           cv::imencode(".jpg", img_mat, compressed_msg->data, params);
           
-          if (need_cleanup) {
-            Arena::ImageFactory::Destroy(image_to_compress);
-          }
+          // converted_image is automatically destroyed by RAII when going out of scope
           
           m_pub_compressed_->publish(std::move(compressed_msg));
         }
@@ -475,8 +475,9 @@ void ArenaCameraNode::publish_images_()
         uint64_t pixel_format = pImage->GetPixelFormat();
         // Check if this is a polarized format (0x8220020F = PolarizedAngles_0d_45d_90d_135d_BayerRG8)
         if (pixel_format == 0x8220020F) {
-            // Use Arena SDK to split channels
-            std::vector<Arena::IImage*> channels = Arena::ImageFactory::SplitChannels(pImage);
+            // Use Arena SDK to split channels - wrap in RAII for exception safety
+            arena_camera::ArenaImageVector channels(
+                Arena::ImageFactory::SplitChannels(pImage));
             
             if (channels.size() == 4) {
               // Define channel info: index, name, publisher, compressed_publisher
@@ -494,10 +495,11 @@ void ArenaCameraNode::publish_images_()
                 {3, "135deg", &m_pub_pol_135deg_, &m_pub_pol_135deg_compressed_}
               };
               
-              // Process each channel
+              // Process each channel - use RAII for converted BGR images
               for (const auto& info : channel_infos) {
-                // Convert channel from BayerRG8 to BGR8
-                Arena::IImage* bgr_image = Arena::ImageFactory::Convert(channels[info.index], 0x02180015); // PFNC_BGR8
+                // Convert channel from BayerRG8 to BGR8 with RAII wrapper
+                arena_camera::ArenaImagePtr bgr_image(
+                    Arena::ImageFactory::Convert(channels[info.index], 0x02180015)); // PFNC_BGR8
                 
                 // Publish raw polarization channel if enabled
                 if (publish_raw_ && *info.raw_pub) {
@@ -535,14 +537,13 @@ void ArenaCameraNode::publish_images_()
                   (*info.compressed_pub)->publish(std::move(compressed_msg));
                 }
                 
-                // Clean up converted BGR image
-                Arena::ImageFactory::Destroy(bgr_image);
+                // bgr_image is automatically destroyed by RAII when going out of scope
               }
               
               // Create max-combined image from all 4 polarization channels
-              if (publish_raw_ && m_pub_pol_max_ || publish_compressed_ && m_pub_pol_max_compressed_) {
-                // Convert all channels to BGR8 first
-                std::vector<Arena::IImage*> bgr_channels;
+              if ((publish_raw_ && m_pub_pol_max_) || (publish_compressed_ && m_pub_pol_max_compressed_)) {
+                // Convert all channels to BGR8 first - use RAII wrapper for exception safety
+                arena_camera::ArenaImageVector bgr_channels;
                 for (size_t i = 0; i < 4; i++) {
                   bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], 0x02180015)); // PFNC_BGR8
                 }
@@ -594,17 +595,11 @@ void ArenaCameraNode::publish_images_()
                   m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
                 }
                 
-                // Clean up BGR channel images
-                for (auto* bgr : bgr_channels) {
-                  Arena::ImageFactory::Destroy(bgr);
-                }
+                // bgr_channels automatically cleaned up by RAII when going out of scope
               }
             }
             
-            // Clean up all channel images
-            for (auto* ch : channels) {
-              Arena::ImageFactory::Destroy(ch);
-            }
+            // channels automatically cleaned up by RAII when going out of scope
           }
       } catch (std::exception& e) {
         log_warn(std::string("Error extracting polarization channels: ") + e.what());
@@ -669,15 +664,16 @@ void ArenaCameraNode::publish_one_image_()
         compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
         compressed_msg->format = "jpeg";
         
+        // Use RAII for converted image to ensure cleanup on exception
+        arena_camera::ArenaImagePtr converted_image;
         Arena::IImage* image_to_compress = nullptr;
-        bool need_cleanup = false;
         
         try {
-          image_to_compress = Arena::ImageFactory::Convert(pImage, 0x02180015); // PFNC_BGR8
-          need_cleanup = true;
+          converted_image = arena_camera::make_arena_image_ptr(
+              Arena::ImageFactory::Convert(pImage, 0x02180015)); // PFNC_BGR8
+          image_to_compress = converted_image.get();
         } catch (...) {
           image_to_compress = pImage;
-          need_cleanup = false;
         }
         
         int cvType = CV_8UC3;
@@ -693,9 +689,7 @@ void ArenaCameraNode::publish_one_image_()
         std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
         cv::imencode(".jpg", img_mat, compressed_msg->data, params);
         
-        if (need_cleanup) {
-          Arena::ImageFactory::Destroy(image_to_compress);
-        }
+        // converted_image is automatically destroyed by RAII when going out of scope
         
         m_pub_compressed_->publish(std::move(compressed_msg));
       }
@@ -724,7 +718,9 @@ void ArenaCameraNode::publish_one_image_()
     try {
       uint64_t pixel_format = pImage->GetPixelFormat();
       if (pixel_format == 0x8220020F) {
-          std::vector<Arena::IImage*> channels = Arena::ImageFactory::SplitChannels(pImage);
+          // Use RAII wrapper for exception safety
+          arena_camera::ArenaImageVector channels(
+              Arena::ImageFactory::SplitChannels(pImage));
           
           if (channels.size() == 4) {
             struct ChannelInfo {
@@ -741,8 +737,10 @@ void ArenaCameraNode::publish_one_image_()
               {3, "135deg", &m_pub_pol_135deg_, &m_pub_pol_135deg_compressed_}
             };
             
+            // Process each channel - use RAII for converted BGR images
             for (const auto& info : channel_infos) {
-              Arena::IImage* bgr_image = Arena::ImageFactory::Convert(channels[info.index], 0x02180015);
+              arena_camera::ArenaImagePtr bgr_image(
+                  Arena::ImageFactory::Convert(channels[info.index], 0x02180015));
               
               if (publish_raw_ && *info.raw_pub) {
                 auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -777,12 +775,13 @@ void ArenaCameraNode::publish_one_image_()
                 (*info.compressed_pub)->publish(std::move(compressed_msg));
               }
               
-              Arena::ImageFactory::Destroy(bgr_image);
+              // bgr_image is automatically destroyed by RAII when going out of scope
             }
             
             // Create max-combined image
             if ((publish_raw_ && m_pub_pol_max_) || (publish_compressed_ && m_pub_pol_max_compressed_)) {
-              std::vector<Arena::IImage*> bgr_channels;
+              // Use RAII wrapper for exception safety
+              arena_camera::ArenaImageVector bgr_channels;
               for (size_t i = 0; i < 4; i++) {
                 bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], 0x02180015));
               }
@@ -831,14 +830,10 @@ void ArenaCameraNode::publish_one_image_()
                 m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
               }
               
-              for (auto* ch : bgr_channels) {
-                Arena::ImageFactory::Destroy(ch);
-              }
+              // bgr_channels automatically cleaned up by RAII when going out of scope
             }
             
-            for (auto* ch : channels) {
-              Arena::ImageFactory::Destroy(ch);
-            }
+            // channels automatically cleaned up by RAII when going out of scope
           }
       }
     } catch (std::exception& e) {
