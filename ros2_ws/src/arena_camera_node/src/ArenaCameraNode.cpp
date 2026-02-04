@@ -163,23 +163,18 @@ void ArenaCameraNode::initialize_()
 {
   using namespace std::chrono_literals;
   // ARENASDK ---------------------------------------------------------------
-  // Custom deleter for system
+  // Use no-op deleters since cleanup is handled explicitly in the destructor
+  // to avoid accessing 'this' after partial destruction
   m_pSystem =
-      std::shared_ptr<Arena::ISystem>(nullptr, [=](Arena::ISystem* pSystem) {
-        if (pSystem) {  // this is an issue for multi devices
-          Arena::CloseSystem(pSystem);
-          log_info("System is destroyed");
-        }
+      std::shared_ptr<Arena::ISystem>(nullptr, [](Arena::ISystem*) {
+        // No-op: cleanup handled in destructor
       });
   m_pSystem.reset(Arena::OpenSystem());
 
-  // Custom deleter for device
+  // No-op deleter for device - cleanup handled in destructor
   m_pDevice =
-      std::shared_ptr<Arena::IDevice>(nullptr, [=](Arena::IDevice* pDevice) {
-        if (m_pSystem && pDevice) {
-          m_pSystem->DestroyDevice(pDevice);
-          log_info("Device is destroyed");
-        }
+      std::shared_ptr<Arena::IDevice>(nullptr, [](Arena::IDevice*) {
+        // No-op: cleanup handled in destructor
       });
 
   //
@@ -366,6 +361,7 @@ void ArenaCameraNode::run_()
   
   try {
     m_pDevice->StartStream();
+    m_is_streaming_.store(true);
     log_debug("StartStream() completed");
   } catch (GenICam::GenericException& e) {
     log_err(std::string("Failed to start stream: ") + e.what());
@@ -633,6 +629,13 @@ void ArenaCameraNode::publish_images_()
 void ArenaCameraNode::publish_one_image_()
 {
   // Non-blocking single image acquisition callback for timer-based streaming
+  
+  // Check if device is still valid and streaming (protects against race with destructor)
+  if (!m_pDevice || !m_is_streaming_.load()) {
+    log_debug("Skipping image acquisition - device shutting down");
+    return;
+  }
+  
   Arena::IImage* pImage = nullptr;
   
   try {
@@ -921,6 +924,13 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     std::shared_ptr<std_srvs::srv::Trigger::Request> request /*unused*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
 {
+  // Check if device is still valid (protects against race with destructor)
+  if (!m_pDevice) {
+    response->message = "Device not available";
+    response->success = false;
+    return;
+  }
+  
   if (!trigger_mode_activated_) {
     std::string msg =
         "Failed to trigger image because the device is not in trigger mode."
