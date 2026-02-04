@@ -634,6 +634,13 @@ void ArenaCameraNode::publish_images_()
 void ArenaCameraNode::publish_one_image_()
 {
   // Non-blocking single image acquisition callback for timer-based streaming
+  
+  // Check if device is still valid and streaming (protects against race with destructor)
+  if (!m_pDevice || !m_is_streaming_.load()) {
+    log_debug("Skipping image acquisition - device shutting down");
+    return;
+  }
+  
   Arena::IImage* pImage = nullptr;
   
   try {
@@ -922,6 +929,13 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     std::shared_ptr<std_srvs::srv::Trigger::Request> request /*unused*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
 {
+  // Check if device is still valid (protects against race with destructor)
+  if (!m_pDevice) {
+    response->message = "Device not available";
+    response->success = false;
+    return;
+  }
+  
   if (!trigger_mode_activated_) {
     std::string msg =
         "Failed to trigger image because the device is not in trigger mode."

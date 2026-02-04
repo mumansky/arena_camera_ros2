@@ -48,7 +48,17 @@ class ArenaCameraNode : public rclcpp::Node
   {
     log_info(std::string("Destroying \"") + this->get_name() + "\" node");
     
-    // Cancel the image acquisition timer first to stop callbacks
+    // Capture streaming state before setting to false.
+    // Note: There's a small race window between this capture and the store below,
+    // but any callback that starts in this window will see m_is_streaming_=false
+    // before accessing m_pDevice, which is the critical safety property.
+    bool was_streaming = m_is_streaming_.load();
+    
+    // Set streaming flag to false FIRST to signal any in-flight callbacks to exit early
+    // This prevents race conditions where a callback tries to use m_pDevice during cleanup
+    m_is_streaming_.store(false);
+    
+    // Cancel the image acquisition timer to stop new callbacks
     if (m_image_acquisition_timer_) {
       m_image_acquisition_timer_->cancel();
       m_image_acquisition_timer_.reset();
@@ -62,11 +72,10 @@ class ArenaCameraNode : public rclcpp::Node
       log_info("Device timer cancelled");
     }
     
-    // Stop streaming and clean up device resources
-    if (m_pDevice && m_is_streaming_.load()) {
+    // Stop streaming on device if it was streaming
+    if (m_pDevice && was_streaming) {
       try {
         m_pDevice->StopStream();
-        m_is_streaming_.store(false);
         log_info("Camera stream stopped");
       } catch (const std::exception& e) {
         log_warn(std::string("Warning during stream stop: ") + e.what());
