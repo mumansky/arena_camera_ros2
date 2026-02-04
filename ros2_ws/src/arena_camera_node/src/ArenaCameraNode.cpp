@@ -149,6 +149,8 @@ void ArenaCameraNode::parse_parameters_()
                    m_config_params_["publish_raw"].as<bool>() : true;
     publish_compressed_ = (m_config_params_ && m_config_params_["publish_compressed"]) ?
                           m_config_params_["publish_compressed"].as<bool>() : false;
+    jpeg_quality_ = (m_config_params_ && m_config_params_["jpeg_quality"]) ?
+                    m_config_params_["jpeg_quality"].as<int>() : 80;
 
   } catch (rclcpp::ParameterTypeException& e) {
     log_err("Parameter exception for: " + nextParameterToDeclare + " - " + std::string(e.what()));
@@ -374,11 +376,10 @@ void ArenaCameraNode::run_()
   m_device_connected_ = true;
 
   if (!trigger_mode_activated_) {
-    log_info("Streaming started - publishing images to " + topic_);
-    // Use a timer for non-blocking image acquisition (1ms interval for high-speed capture)
-    using namespace std::chrono_literals;
-    m_image_acquisition_timer_ = this->create_wall_timer(
-        1ms, std::bind(&ArenaCameraNode::publish_one_image_, this));
+    log_info("Streaming started with event-driven callbacks - publishing images to " + topic_);
+    // Register callback handler for event-driven image acquisition
+    m_image_callback_handler_ = std::make_unique<ImageCallbackHandler>(this);
+    m_pDevice->RegisterImageCallback(m_image_callback_handler_.get());
   } else {
     log_info("Trigger mode enabled - waiting for trigger service calls");
   }
@@ -626,9 +627,9 @@ void ArenaCameraNode::publish_images_()
   };
 }
 
-void ArenaCameraNode::publish_one_image_()
+void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
 {
-  // Non-blocking single image acquisition callback for timer-based streaming
+  // Event-driven image handler called by ArenaSDK when new image arrives
   
   // Check if device is still valid and streaming (protects against race with destructor)
   if (!m_pDevice || !m_is_streaming_.load()) {
@@ -636,13 +637,36 @@ void ArenaCameraNode::publish_one_image_()
     return;
   }
   
-  Arena::IImage* pImage = nullptr;
+  // Backpressure detection: Skip this callback if still processing previous image
+  // This prevents queue buildup when image processing takes longer than frame arrival
+  bool expected = false;
+  if (!m_processing_image_.compare_exchange_strong(expected, true)) {
+    // Still processing previous image - skip this frame
+    m_backpressure_events_++;
+    if (m_backpressure_events_ % 100 == 1) {
+      // Log on 1st event and every 100th thereafter (1, 101, 201, ...) to catch initial issues
+      log_warn(std::string("Backpressure detected: skipping frame (total skipped: ") + 
+               std::to_string(m_backpressure_events_) + 
+               ", last processing time: " + std::to_string(m_last_processing_time_ms_) + "ms)");
+    }
+    return;
+  }
+  
+  // RAII scope guard to automatically reset processing flag on function exit
+  // This ensures the flag is always reset regardless of how we exit (return, exception, etc.)
+  struct ProcessingGuard {
+    std::atomic<bool>& flag;
+    explicit ProcessingGuard(std::atomic<bool>& f) : flag(f) {}
+    ~ProcessingGuard() { flag.store(false); }
+  } processing_guard(m_processing_image_);
+  
+  // Measure processing time
+  auto processing_start = std::chrono::steady_clock::now();
   
   try {
-    // Use a short timeout since we're being called frequently by timer
-    pImage = m_pDevice->GetImage(100);  // 100ms timeout
+    // Image is provided by callback - no GetImage() call needed
     if (!pImage) {
-      return;  // No image available, will try again on next timer callback
+      return;
     }
     
     // Publish raw image if enabled
@@ -686,7 +710,7 @@ void ArenaCameraNode::publish_one_image_()
                        cvType,
                        const_cast<void*>(static_cast<const void*>(image_to_compress->GetData())));
         
-        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
+        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
         cv::imencode(".jpg", img_mat, compressed_msg->data, params);
         
         // converted_image is automatically destroyed by RAII when going out of scope
@@ -769,7 +793,7 @@ void ArenaCameraNode::publish_one_image_()
                 
                 cv::Mat bgr_mat(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3, 
                                const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
-                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
+                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
                 cv::imencode(".jpg", bgr_mat, compressed_msg->data, params);
                 
                 (*info.compressed_pub)->publish(std::move(compressed_msg));
@@ -824,7 +848,7 @@ void ArenaCameraNode::publish_one_image_()
                 compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
                 compressed_msg->format = "jpeg";
                 
-                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
+                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
                 cv::imencode(".jpg", max_combined, compressed_msg->data, params);
                 
                 m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
@@ -840,20 +864,31 @@ void ArenaCameraNode::publish_one_image_()
       log_warn(std::string("Error extracting polarization channels: ") + e.what());
     }
     
-    this->m_pDevice->RequeueBuffer(pImage);
+    // Note: With callback-based acquisition, ArenaSDK manages the image lifecycle
+    // No manual RequeueBuffer needed - image is automatically returned when callback exits
+    
+    // Calculate and store processing time
+    auto processing_end = std::chrono::steady_clock::now();
+    m_last_processing_time_ms_ = std::chrono::duration<double, std::milli>(
+        processing_end - processing_start).count();
+    
+    // Update max processing time
+    if (m_last_processing_time_ms_ > m_max_processing_time_ms_) {
+      m_max_processing_time_ms_ = m_last_processing_time_ms_;
+    }
+    
+    // Update running average
+    m_total_processing_time_ms_ += m_last_processing_time_ms_;
+    m_processing_time_samples_++;
 
-  } catch (GenICam::TimeoutException& e) {
-    // Timeout is normal when camera is slow or no new frame available
-    // Just return and wait for next timer callback
-    return;
   } catch (std::exception& e) {
     m_image_publish_errors_++;
-    if (pImage) {
-      this->m_pDevice->RequeueBuffer(pImage);
-      pImage = nullptr;
-      log_err(std::string("Exception occurred while publishing an image: ") + e.what());
-    }
+    log_err(std::string("Exception occurred while publishing an image: ") + e.what());
+    // Note: With callbacks, image is automatically returned by ArenaSDK when callback exits
+    // processing_guard RAII will automatically reset m_processing_image_ flag
+    return;
   }
+  // Note: processing_guard RAII will automatically reset m_processing_image_ flag on exit
 }
 
 void ArenaCameraNode::msg_form_image_(Arena::IImage* pImage,
@@ -1363,11 +1398,24 @@ void ArenaCameraNode::set_nodes_frame_rate_()
                (acquisition_frame_rate_enable_ ? "true" : "false"));
     }
     
+    // Determine if frame rate control is enabled (either explicitly set or from camera)
+    bool frame_rate_enabled = is_passed_acquisition_frame_rate_enable_ 
+        ? acquisition_frame_rate_enable_ 
+        : Arena::GetNodeValue<bool>(nodemap, "AcquisitionFrameRateEnable");
+    
+    // If frame rate control is disabled, log and skip setting the frame rate value
+    if (!frame_rate_enabled) {
+      if (is_passed_acquisition_frame_rate_) {
+        log_info("\tFrame rate value specified but acquisition_frame_rate_enable is false. "
+                 "Frame rate control disabled, camera will run at maximum rate.");
+      } else {
+        log_debug("\tFrame rate control disabled, camera will run at maximum rate.");
+      }
+      return;
+    }
+    
     // Set frame rate value if specified and enabled
-    if (is_passed_acquisition_frame_rate_ && 
-        (is_passed_acquisition_frame_rate_enable_ ? acquisition_frame_rate_enable_ : 
-         Arena::GetNodeValue<bool>(nodemap, "AcquisitionFrameRateEnable"))) {
-      
+    if (is_passed_acquisition_frame_rate_) {
       // Get the node to validate min/max
       GenApi::CFloatPtr pAcquisitionFrameRate = nodemap->GetNode("AcquisitionFrameRate");
       
@@ -1386,11 +1434,28 @@ void ArenaCameraNode::set_nodes_frame_rate_()
           frame_rate = pAcquisitionFrameRate->GetMax();
         }
         
+        // Validate frame rate vs exposure time conflict
+        // Frame rate and exposure time are interdependent:
+        //   - max_exposure_time (in microseconds) ≈ 1,000,000 / frame_rate
+        // If the configured exposure time exceeds this limit, warn the user
+        if (is_passed_exposure_time_ && frame_rate > 0) {
+          // Calculate max exposure time in microseconds for given frame rate
+          double max_exposure_for_frame_rate = 1000000.0 / frame_rate;
+          if (exposure_time_ > max_exposure_for_frame_rate) {
+            log_warn(std::string("\tPotential conflict: Configured exposure time (") + 
+                     std::to_string(exposure_time_) + " us) exceeds maximum allowed by frame rate (" +
+                     std::to_string(max_exposure_for_frame_rate) + " us at " + 
+                     std::to_string(frame_rate) + " FPS). The camera may limit actual exposure time.");
+          }
+        }
+        
         Arena::SetNodeValue<double>(nodemap, "AcquisitionFrameRate", frame_rate);
         log_info(std::string("\tAcquisitionFrameRate set to ") + std::to_string(frame_rate) + " FPS");
       } else {
         log_warn("\tAcquisitionFrameRate node not writable");
       }
+    } else {
+      log_info("\tFrame rate control enabled but no frame rate value specified. Using camera default.");
     }
   } catch (GenICam::GenericException& e) {
     log_warn(std::string("\tFrame rate configuration warning: ") + e.what());
@@ -1452,9 +1517,16 @@ void ArenaCameraNode::set_nodes_test_pattern_image_()
 void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat)
 {
   if (m_device_connected_) {
-    if (m_image_publish_errors_ > 0) {
-      stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN,
-                   "Camera connected with errors");
+    if (m_image_publish_errors_ > 0 || m_backpressure_events_ > 0) {
+      std::string warn_msg = "Camera connected with";
+      if (m_image_publish_errors_ > 0) {
+        warn_msg += " errors";
+      }
+      if (m_backpressure_events_ > 0) {
+        if (m_image_publish_errors_ > 0) warn_msg += " and";
+        warn_msg += " backpressure";
+      }
+      stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, warn_msg);
     } else {
       stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK,
                    "Camera operating normally");
@@ -1470,6 +1542,18 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
   stat.add("Calculated FPS", std::to_string(m_calculated_fps_));
   stat.add("Trigger Mode", trigger_mode_activated_ ? "enabled" : "disabled");
   stat.add("Topic", topic_);
+  
+  // Backpressure metrics (Task 4)
+  stat.add("Backpressure Events", std::to_string(m_backpressure_events_));
+  stat.add("Last Processing Time (ms)", std::to_string(m_last_processing_time_ms_));
+  stat.add("Max Processing Time (ms)", std::to_string(m_max_processing_time_ms_));
+  if (m_processing_time_samples_ > 0) {
+    double avg_processing_time = m_total_processing_time_ms_ / m_processing_time_samples_;
+    stat.add("Avg Processing Time (ms)", std::to_string(avg_processing_time));
+  } else {
+    stat.add("Avg Processing Time (ms)", "N/A");
+  }
+  stat.add("Processing Time Samples", std::to_string(m_processing_time_samples_));
 
   if (m_device_connected_) {
     stat.add("Serial", serial_.empty() ? "first discovered" : serial_);
