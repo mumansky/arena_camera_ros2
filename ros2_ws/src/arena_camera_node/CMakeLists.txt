@@ -264,6 +264,7 @@ if(BUILD_TESTING)
   )
   ament_target_dependencies(test_arena_image_raii
     arena_sdk
+    OpenCV
   )
 endif()
 
