@@ -263,8 +263,12 @@ class ArenaCameraNode : public rclcpp::Node
   bool publish_raw_;
   bool publish_compressed_;
   
+<<<<<<< HEAD
   std::string compression_format_;  // Compression format: "jpeg" or "png"
   int compression_quality_;  // Compression quality (1-100, default 90)
+=======
+  int jpeg_quality_;  // JPEG compression quality (1-100, default 80)
+>>>>>>> 93e07e7e68dac14bd0d529ff359de29749f1bf52
 
   YAML::Node m_config_params_;
 

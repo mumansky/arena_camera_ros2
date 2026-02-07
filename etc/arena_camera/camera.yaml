@@ -99,6 +99,7 @@
     # Compressed images are published to <topic>/compressed
     # For polarized cameras, applies to both main topic and /pol_0deg channel
     
+<<<<<<< HEAD
     # Compression Settings
     # --------------------
     # Compression format for compressed image messages
@@ -118,6 +119,16 @@
     #   - Typical value: 50-70 for balanced PNG compression
     # Default: 90
     compression_quality: 90
+=======
+    # JPEG Compression Quality
+    # ------------------------
+    # Quality setting for JPEG compression (1-100)
+    # Lower values = smaller files, faster encoding, lower quality
+    # Higher values = larger files, slower encoding, better quality
+    # Default: 80 (good balance of quality and performance)
+    # Recommended range: 50-90
+    jpeg_quality: 50
+>>>>>>> 93e07e7e68dac14bd0d529ff359de29749f1bf52
 
 # Example configurations for common use cases:
 # ============================================

@@ -207,6 +207,7 @@ void ArenaCameraNode::parse_parameters_()
                    m_config_params_["publish_raw"].as<bool>() : true;
     publish_compressed_ = (m_config_params_ && m_config_params_["publish_compressed"]) ?
                           m_config_params_["publish_compressed"].as<bool>() : false;
+<<<<<<< HEAD
     
     // Read compression settings from config file
     compression_format_ = (m_config_params_ && m_config_params_["compression_format"]) ?
@@ -228,6 +229,10 @@ void ArenaCameraNode::parse_parameters_()
     
     log_info("Compression settings: format=" + compression_format_ + 
              ", quality=" + std::to_string(compression_quality_));
+=======
+    jpeg_quality_ = (m_config_params_ && m_config_params_["jpeg_quality"]) ?
+                    m_config_params_["jpeg_quality"].as<int>() : 80;
+>>>>>>> 93e07e7e68dac14bd0d529ff359de29749f1bf52
 
   } catch (rclcpp::ParameterTypeException& e) {
     log_err("Parameter exception for: " + nextParameterToDeclare + " - " + std::string(e.what()));
@@ -520,6 +525,7 @@ void ArenaCameraNode::publish_images_()
                          cvType,
                          const_cast<void*>(static_cast<const void*>(image_to_compress->GetData())));
           
+<<<<<<< HEAD
           if (compression_format_ == "jpeg") {
             std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
             cv::imencode(".jpg", img_mat, compressed_msg->data, params);
@@ -531,6 +537,12 @@ void ArenaCameraNode::publish_images_()
             std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, png_level};
             cv::imencode(".png", img_mat, compressed_msg->data, params);
           }
+=======
+          std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
+          cv::imencode(".jpg", img_mat, compressed_msg->data, params);
+          
+          // converted_image is automatically destroyed by RAII when going out of scope
+>>>>>>> 93e07e7e68dac14bd0d529ff359de29749f1bf52
           
           // converted_image is automatically destroyed by RAII when going out of scope
           
@@ -825,6 +837,7 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
                        cvType,
                        const_cast<void*>(static_cast<const void*>(image_to_compress->GetData())));
         
+<<<<<<< HEAD
         if (compression_format_ == "jpeg") {
           std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
           cv::imencode(".jpg", img_mat, compressed_msg->data, params);
@@ -834,6 +847,12 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
           std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, png_level};
           cv::imencode(".png", img_mat, compressed_msg->data, params);
         }
+=======
+        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
+        cv::imencode(".jpg", img_mat, compressed_msg->data, params);
+        
+        // converted_image is automatically destroyed by RAII when going out of scope
+>>>>>>> 93e07e7e68dac14bd0d529ff359de29749f1bf52
         
         // converted_image is automatically destroyed by RAII when going out of scope
         
@@ -915,6 +934,7 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
                 
                 cv::Mat bgr_mat(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3, 
                                const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
+<<<<<<< HEAD
                 
                 if (compression_format_ == "jpeg") {
                   std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
@@ -925,6 +945,10 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
                   std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, png_level};
                   cv::imencode(".png", bgr_mat, compressed_msg->data, params);
                 }
+=======
+                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
+                cv::imencode(".jpg", bgr_mat, compressed_msg->data, params);
+>>>>>>> 93e07e7e68dac14bd0d529ff359de29749f1bf52
                 
                 (*info.compressed_pub)->publish(std::move(compressed_msg));
               }
@@ -978,6 +1002,7 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
                 compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
                 compressed_msg->format = compression_format_;
                 
+<<<<<<< HEAD
                 if (compression_format_ == "jpeg") {
                   std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, compression_quality_};
                   cv::imencode(".jpg", max_combined, compressed_msg->data, params);
@@ -987,6 +1012,10 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
                   std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, png_level};
                   cv::imencode(".png", max_combined, compressed_msg->data, params);
                 }
+=======
+                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
+                cv::imencode(".jpg", max_combined, compressed_msg->data, params);
+>>>>>>> 93e07e7e68dac14bd0d529ff359de29749f1bf52
                 
                 m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
               }
