@@ -1661,6 +1661,38 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
         // If not available, skip
       }
       
+      // Device power
+      try {
+        double device_power = Arena::GetNodeValue<double>(nodemap, "DevicePower");
+        stat.add("DevicePower (W)", std::to_string(device_power));
+      } catch (...) {
+        // If not available, skip
+      }
+      
+      // Device uptime
+      try {
+        int64_t device_uptime = Arena::GetNodeValue<int64_t>(nodemap, "DeviceUpTime");
+        stat.add("DeviceUpTime (ms)", std::to_string(device_uptime));
+      } catch (...) {
+        // If not available, skip
+      }
+      
+      // Link uptime
+      try {
+        int64_t link_uptime = Arena::GetNodeValue<int64_t>(nodemap, "LinkUpTime");
+        stat.add("LinkUpTime (ms)", std::to_string(link_uptime));
+      } catch (...) {
+        // If not available, skip
+      }
+      
+      // Device temperature
+      try {
+        double device_temperature = Arena::GetNodeValue<double>(nodemap, "DeviceTemperature");
+        stat.add("DeviceTemperature (°C)", std::to_string(device_temperature));
+      } catch (...) {
+        // If not available, skip
+      }
+      
     } catch (const std::exception& e) {
       stat.add("Camera Parameters", std::string("error: ") + e.what());
     }
