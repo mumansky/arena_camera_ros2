@@ -21,6 +21,67 @@
 #include "rclcpp_adapter/pixelformat_translation.h"
 #include "rclcpp_adapter/quilty_of_service_translation.cpp"
 
+// ============================================================================
+// Pixel Format Constants
+// ============================================================================
+// These constants define the PFNC (PixelFormat Naming Convention) values used
+// by Arena SDK for different image formats. Using named constants instead of
+// magic numbers improves code readability and maintainability.
+
+namespace PixelFormat {
+  // BGR8 format (3 channels, 8 bits per channel, Blue-Green-Red order)
+  // Used for standard color images compatible with OpenCV and JPEG compression
+  constexpr uint64_t PFNC_BGR8 = 0x02180015;
+  
+  // PolarizedAngles_0d_45d_90d_135d_BayerRG8 format
+  // Used by polarized cameras (e.g., PHX050S1-QC) that capture 4 polarization
+  // angles (0°, 45°, 90°, 135°) in a single Bayer pattern image.
+  // Each 2x2 Bayer quad contains one pixel for each polarization angle.
+  constexpr uint64_t PFNC_POLARIZED_BAYER_RG8 = 0x8220020F;
+}
+
+// ============================================================================
+// Helper Functions for Pixel Format Detection
+// ============================================================================
+
+/**
+ * @brief Check if the given pixel format is a polarized format
+ * @param format PFNC pixel format value from Arena SDK
+ * @return true if the format is a polarized format, false otherwise
+ */
+inline bool is_polarized_format(uint64_t format) {
+  return format == PixelFormat::PFNC_POLARIZED_BAYER_RG8;
+}
+
+/**
+ * @brief Check if the given pixel format is supported by this node
+ * @param format PFNC pixel format value from Arena SDK
+ * @return true if the format is supported, false otherwise
+ */
+inline bool is_supported_format(uint64_t format) {
+  // Currently we support:
+  // 1. Polarized format for PHX050S1-QC cameras
+  // 2. Any format that can be converted to BGR8 (handled by Arena SDK Convert)
+  // If format is polarized, we handle it specially
+  // Otherwise, we attempt conversion to BGR8
+  return true;  // We attempt to handle all formats via conversion
+}
+
+/**
+ * @brief Get a human-readable name for a pixel format
+ * @param format PFNC pixel format value from Arena SDK
+ * @return String describing the pixel format
+ */
+inline std::string get_pixel_format_name(uint64_t format) {
+  if (format == PixelFormat::PFNC_POLARIZED_BAYER_RG8) {
+    return "PolarizedAngles_0d_45d_90d_135d_BayerRG8";
+  } else if (format == PixelFormat::PFNC_BGR8) {
+    return "BGR8";
+  } else {
+    return "Unknown (0x" + std::to_string(format) + ")";
+  }
+}
+
 void ArenaCameraNode::load_config_file_()
 {
   // Try multiple possible locations for the config file
@@ -410,7 +471,7 @@ void ArenaCameraNode::publish_images_()
         
         // Skip compression for polarized formats on main topic
         // (compressed polarized data is available on pol_0deg/compressed topic)
-        if (pixel_format != 0x8220020F) { // Not PolarizedAngles_0d_45d_90d_135d_BayerRG8
+        if (!is_polarized_format(pixel_format)) {
           auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
           compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
           compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
@@ -424,7 +485,7 @@ void ArenaCameraNode::publish_images_()
           // Try to convert to BGR8 for compression compatibility
           try {
             converted_image = arena_camera::make_arena_image_ptr(
-                Arena::ImageFactory::Convert(pImage, 0x02180015)); // PFNC_BGR8
+                Arena::ImageFactory::Convert(pImage, PixelFormat::PFNC_BGR8));
             image_to_compress = converted_image.get();
           } catch (...) {
             // If conversion fails, try the original format
@@ -474,8 +535,8 @@ void ArenaCameraNode::publish_images_()
       // Extract and publish all polarization channels if format is polarized
       try {
         uint64_t pixel_format = pImage->GetPixelFormat();
-        // Check if this is a polarized format (0x8220020F = PolarizedAngles_0d_45d_90d_135d_BayerRG8)
-        if (pixel_format == 0x8220020F) {
+        // Check if this is a polarized format
+        if (is_polarized_format(pixel_format)) {
             // Use Arena SDK to split channels - wrap in RAII for exception safety
             arena_camera::ArenaImageVector channels(
                 Arena::ImageFactory::SplitChannels(pImage));
@@ -500,7 +561,7 @@ void ArenaCameraNode::publish_images_()
               for (const auto& info : channel_infos) {
                 // Convert channel from BayerRG8 to BGR8 with RAII wrapper
                 arena_camera::ArenaImagePtr bgr_image(
-                    Arena::ImageFactory::Convert(channels[info.index], 0x02180015)); // PFNC_BGR8
+                    Arena::ImageFactory::Convert(channels[info.index], PixelFormat::PFNC_BGR8));
                 
                 // Publish raw polarization channel if enabled
                 if (publish_raw_ && *info.raw_pub) {
@@ -546,7 +607,7 @@ void ArenaCameraNode::publish_images_()
                 // Convert all channels to BGR8 first - use RAII wrapper for exception safety
                 arena_camera::ArenaImageVector bgr_channels;
                 for (size_t i = 0; i < 4; i++) {
-                  bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], 0x02180015)); // PFNC_BGR8
+                  bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], PixelFormat::PFNC_BGR8));
                 }
                 
                 // Get dimensions from first channel
@@ -669,6 +730,20 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
       return;
     }
     
+    // Log pixel format on first image (for debugging/verification)
+    static bool format_logged = false;
+    if (!format_logged) {
+      uint64_t pixel_format = pImage->GetPixelFormat();
+      std::string format_info = "Camera pixel format detected: " + get_pixel_format_name(pixel_format);
+      if (is_polarized_format(pixel_format)) {
+        format_info += " (polarized camera - will extract 4 channels: 0°, 45°, 90°, 135°)";
+      } else {
+        format_info += " (standard camera - will convert to BGR8 for publishing)";
+      }
+      log_info(format_info);
+      format_logged = true;
+    }
+    
     // Publish raw image if enabled
     if (publish_raw_ && m_pub_) {
       auto p_image_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -681,7 +756,7 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
       uint64_t pixel_format = pImage->GetPixelFormat();
       
       // Skip compression for polarized formats on main topic
-      if (pixel_format != 0x8220020F) { // Not PolarizedAngles_0d_45d_90d_135d_BayerRG8
+      if (!is_polarized_format(pixel_format)) {
         auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
         compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
         compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
@@ -694,7 +769,7 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
         
         try {
           converted_image = arena_camera::make_arena_image_ptr(
-              Arena::ImageFactory::Convert(pImage, 0x02180015)); // PFNC_BGR8
+              Arena::ImageFactory::Convert(pImage, PixelFormat::PFNC_BGR8));
           image_to_compress = converted_image.get();
         } catch (...) {
           image_to_compress = pImage;
@@ -741,7 +816,7 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
     // Extract and publish all polarization channels if format is polarized
     try {
       uint64_t pixel_format = pImage->GetPixelFormat();
-      if (pixel_format == 0x8220020F) {
+      if (is_polarized_format(pixel_format)) {
           // Use RAII wrapper for exception safety
           arena_camera::ArenaImageVector channels(
               Arena::ImageFactory::SplitChannels(pImage));
@@ -764,7 +839,7 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
             // Process each channel - use RAII for converted BGR images
             for (const auto& info : channel_infos) {
               arena_camera::ArenaImagePtr bgr_image(
-                  Arena::ImageFactory::Convert(channels[info.index], 0x02180015));
+                  Arena::ImageFactory::Convert(channels[info.index], PixelFormat::PFNC_BGR8));
               
               if (publish_raw_ && *info.raw_pub) {
                 auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -807,7 +882,7 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
               // Use RAII wrapper for exception safety
               arena_camera::ArenaImageVector bgr_channels;
               for (size_t i = 0; i < 4; i++) {
-                bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], 0x02180015));
+                bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], PixelFormat::PFNC_BGR8));
               }
               
               size_t height = bgr_channels[0]->GetHeight();
