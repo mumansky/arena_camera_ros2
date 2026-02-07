@@ -266,6 +266,12 @@ if(BUILD_TESTING)
     arena_sdk
     OpenCV
   )
+
+  # Config helper and pixel format utility tests
+  ament_add_gtest(test_config_helpers
+    test/test_config_helpers.cpp
+  )
+  target_link_libraries(test_config_helpers yaml-cpp)
 endif()
 
 ament_package()

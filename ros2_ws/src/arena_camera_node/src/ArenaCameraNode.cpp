@@ -1,5 +1,48 @@
-#include <cstring>    // memcopy
-#include <stdexcept>  // std::runtime_err
+/**
+ * @file ArenaCameraNode.cpp
+ * @brief ROS2 node for LUCID (Arena) cameras
+ *
+ * This file implements the ArenaCameraNode class which uses the ArenaSDK C++ API
+ * to discover and stream images from LUCID cameras (e.g., PHX050S1-QC polarized cameras).
+ *
+ * == Pixel Format Reference ==
+ * The node works with PFNC (PixelFormat Naming Convention) values from Arena SDK:
+ *   - PFNC_BGR8 (0x02180015): 3-channel Blue-Green-Red, 8 bits per channel.
+ *     This is the standard output format for OpenCV and compressed image publishing.
+ *   - PFNC_POLARIZED_BAYER_RG8 (0x8220020F): Polarized 4-angle Bayer pattern.
+ *     Used by PHX050S1-QC cameras. Each 2x2 superpixel contains one pixel for each
+ *     of 4 polarization angles (0°, 45°, 90°, 135°) in a BayerRG8 pattern.
+ *
+ * == Polarization Channel Ordering ==
+ * When the polarized format is detected, ImageFactory::SplitChannels() returns
+ * a vector of 4 images in this order:
+ *   channels[0] = 0° polarization angle
+ *   channels[1] = 45° polarization angle
+ *   channels[2] = 90° polarization angle
+ *   channels[3] = 135° polarization angle
+ * Each channel is in BayerRG8 format and must be converted to BGR8 before publishing.
+ *
+ * == Timeout Values ==
+ *   - Device discovery timeout: 100ms (UpdateDevices call)
+ *   - GetImage timeout: 1000ms (1 second) for blocking image retrieval
+ *   - Device connection timer: 1s interval for polling camera availability
+ *   - FPS calculation window: 1000ms (1 second rolling window)
+ *   - Watchdog timeout: configurable via watchdog_timeout_sec (default 5.0s)
+ *
+ * == Architecture ==
+ * The node operates in two modes:
+ *   1. Continuous mode (default): Uses ArenaSDK callbacks (RegisterImageCallback)
+ *      for event-driven image acquisition. The handle_camera_image_() method
+ *      processes each frame as it arrives.
+ *   2. Trigger mode: Waits for service calls via the trigger_image service.
+ *      Uses blocking GetImage() in publish_an_image_on_trigger_().
+ *
+ * The legacy blocking publish_images_() loop is retained but not used in the
+ * current callback-based architecture.
+ */
+
+#include <cstring>    // memcpy
+#include <stdexcept>  // std::runtime_error
 #include <string>
 #include <fstream>    // file I/O
 #include <vector>     // vector
