@@ -264,6 +264,12 @@ class ArenaCameraNode : public rclcpp::Node
   bool publish_compressed_;
   
   int jpeg_quality_;  // JPEG compression quality (1-100, default 80)
+  
+  // Watchdog settings (Task 20)
+  double watchdog_timeout_sec_;  // Seconds without a new frame before declaring camera frozen (default 5.0)
+  std::chrono::steady_clock::time_point m_last_frame_time_;  // Timestamp of last successfully received frame
+  bool m_watchdog_initialized_{false};  // Whether we've received at least one frame
+  bool m_camera_frozen_{false};  // Whether the camera is currently detected as frozen
 
   YAML::Node m_config_params_;
 
