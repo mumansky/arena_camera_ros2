@@ -10,6 +10,7 @@
 //
 
 // std
+#include <atomic>      // std::atomic for thread-safe flags (streaming state, backpressure)
 #include <chrono>      //chrono_literals
 #include <functional>  // std::bind , std::placeholders
 
@@ -26,11 +27,16 @@
 
 class ArenaCameraNode : public rclcpp::Node
 {
+ private:
+  // Forward declaration for image callback handler
+  class ImageCallbackHandler;
+  
  public:
   ArenaCameraNode() : Node("arena_camera_node"),
     m_images_published_(0),
     m_image_publish_errors_(0),
-    m_device_connected_(false)
+    m_device_connected_(false),
+    m_is_streaming_(false)
   {
     // set stdout buffer size for ROS defined size BUFSIZE
     setvbuf(stdout, NULL, _IONBF, BUFSIZ);
@@ -45,6 +51,79 @@ class ArenaCameraNode : public rclcpp::Node
   ~ArenaCameraNode()
   {
     log_info(std::string("Destroying \"") + this->get_name() + "\" node");
+    
+    // Capture streaming state before setting to false.
+    // Note: There's a small race window between this capture and the store below,
+    // but any callback that starts in this window will see m_is_streaming_=false
+    // before accessing m_pDevice, which is the critical safety property.
+    bool was_streaming = m_is_streaming_.load();
+    
+    // Set streaming flag to false FIRST to signal any in-flight callbacks to exit early
+    // This prevents race conditions where a callback tries to use m_pDevice during cleanup
+    m_is_streaming_.store(false);
+    
+    // Deregister image callback before stopping stream
+    if (m_image_callback_handler_ && m_pDevice) {
+      try {
+        m_pDevice->DeregisterImageCallback(m_image_callback_handler_.get());
+        m_image_callback_handler_.reset();
+        log_info("Image callback deregistered");
+      } catch (const std::exception& e) {
+        log_warn(std::string("Warning during callback deregistration: ") + e.what());
+      }
+    }
+    
+    // Cancel the wait for device timer
+    if (m_wait_for_device_timer_callback_) {
+      m_wait_for_device_timer_callback_->cancel();
+      m_wait_for_device_timer_callback_.reset();
+      log_info("Device timer cancelled");
+    }
+    
+    // Stop streaming on device if it was streaming
+    if (m_pDevice && was_streaming) {
+      try {
+        m_pDevice->StopStream();
+        log_info("Camera stream stopped");
+      } catch (const std::exception& e) {
+        log_warn(std::string("Warning during stream stop: ") + e.what());
+      } catch (...) {
+        log_warn("Unknown exception during stream stop");
+      }
+    }
+    
+    // Destroy device before system (order matters)
+    // Extract raw pointer, call cleanup, then release shared_ptr
+    // The deleters are no-op so we handle cleanup explicitly here
+    if (m_pDevice && m_pSystem) {
+      try {
+        Arena::IDevice* pDevice = m_pDevice.get();
+        m_pSystem->DestroyDevice(pDevice);
+        log_info("Device is destroyed");
+      } catch (const std::exception& e) {
+        log_warn(std::string("Warning during device cleanup: ") + e.what());
+      } catch (...) {
+        log_warn("Unknown exception during device cleanup");
+      }
+      m_pDevice.reset();  // Release shared_ptr (deleter is no-op)
+    }
+    
+    // Close system
+    if (m_pSystem) {
+      try {
+        Arena::ISystem* pSystem = m_pSystem.get();
+        Arena::CloseSystem(pSystem);
+        log_info("System is destroyed");
+      } catch (const std::exception& e) {
+        log_warn(std::string("Warning during system cleanup: ") + e.what());
+      } catch (...) {
+        log_warn("Unknown exception during system cleanup");
+      }
+      m_pSystem.reset();  // Release shared_ptr (deleter is no-op)
+    }
+    
+    m_device_connected_ = false;
+    log_info(std::string("Destroyed \"") + this->get_name() + "\" node");
   }
 
   void log_debug(std::string msg) { RCLCPP_DEBUG(this->get_logger(), msg.c_str()); };
@@ -53,6 +132,25 @@ class ArenaCameraNode : public rclcpp::Node
   void log_err(std::string msg) { RCLCPP_ERROR(this->get_logger(), msg.c_str()); };
 
  private:
+  // Image callback handler class for ArenaSDK event-driven acquisition
+  class ImageCallbackHandler : public Arena::IImageCallback
+  {
+  public:
+    explicit ImageCallbackHandler(ArenaCameraNode* node) : m_node_(node) {}
+    
+    void OnImage(Arena::IImage* pImage) override
+    {
+      if (m_node_) {
+        m_node_->handle_camera_image_(pImage);
+      }
+    }
+    
+  private:
+    ArenaCameraNode* m_node_;
+  };
+  
+  // Image handler called by ArenaSDK callback
+  void handle_camera_image_(Arena::IImage* pImage);
   std::shared_ptr<Arena::ISystem> m_pSystem;
   std::shared_ptr<Arena::IDevice> m_pDevice;
 
@@ -69,8 +167,10 @@ class ArenaCameraNode : public rclcpp::Node
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_pol_max_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_pol_max_compressed_;
   rclcpp::TimerBase::SharedPtr m_wait_for_device_timer_callback_;
-  rclcpp::TimerBase::SharedPtr m_image_acquisition_timer_;  // Timer for non-blocking image acquisition
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr m_trigger_an_image_srv_;
+  
+  // Image callback handler for event-driven acquisition
+  std::unique_ptr<ImageCallbackHandler> m_image_callback_handler_;
 
   // Diagnostics
   std::unique_ptr<diagnostic_updater::Updater> m_diagnostic_updater_;
@@ -78,10 +178,21 @@ class ArenaCameraNode : public rclcpp::Node
   uint64_t m_image_publish_errors_;
   bool m_device_connected_;
   
+  // Streaming state for proper cleanup (atomic for thread safety between destructor and deleters)
+  std::atomic<bool> m_is_streaming_;
+  
   // FPS calculation
   std::chrono::steady_clock::time_point m_fps_last_time_;
   uint64_t m_fps_frame_count_;
   double m_calculated_fps_;
+
+  // Backpressure monitoring (Task 4)
+  std::atomic<bool> m_processing_image_{false};  // Flag to detect if still processing
+  uint64_t m_backpressure_events_{0};            // Count of skipped frames due to backpressure
+  double m_last_processing_time_ms_{0.0};        // Last frame processing time in ms
+  double m_max_processing_time_ms_{0.0};         // Max processing time observed
+  double m_total_processing_time_ms_{0.0};       // Sum of processing times for average calculation
+  uint64_t m_processing_time_samples_{0};        // Number of processing time samples
 
   std::string serial_;
   bool is_passed_serial_;
@@ -151,6 +262,8 @@ class ArenaCameraNode : public rclcpp::Node
 
   bool publish_raw_;
   bool publish_compressed_;
+  
+  int jpeg_quality_;  // JPEG compression quality (1-100, default 80)
 
   YAML::Node m_config_params_;
 
@@ -174,7 +287,6 @@ class ArenaCameraNode : public rclcpp::Node
   void set_nodes_trigger_mode_();
   void set_nodes_test_pattern_image_();
   void publish_images_();  // Legacy blocking implementation
-  void publish_one_image_();  // Non-blocking timer callback for image acquisition
 
   void publish_an_image_on_trigger_(
       std::shared_ptr<std_srvs::srv::Trigger::Request> request,

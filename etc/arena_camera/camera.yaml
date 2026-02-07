@@ -98,6 +98,15 @@
     # Note: You can enable both to publish raw and compressed simultaneously
     # Compressed images are published to <topic>/compressed
     # For polarized cameras, applies to both main topic and /pol_0deg channel
+    
+    # JPEG Compression Quality
+    # ------------------------
+    # Quality setting for JPEG compression (1-100)
+    # Lower values = smaller files, faster encoding, lower quality
+    # Higher values = larger files, slower encoding, better quality
+    # Default: 80 (good balance of quality and performance)
+    # Recommended range: 50-90
+    jpeg_quality: 50
 
 # Example configurations for common use cases:
 # ============================================
