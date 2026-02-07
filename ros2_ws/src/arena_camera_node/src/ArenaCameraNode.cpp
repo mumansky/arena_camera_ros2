@@ -16,9 +16,68 @@
 
 // ArenaSDK
 #include "ArenaCameraNode.h"
+#include "arena_image_raii.h"
 #include "light_arena/deviceinfo_helper.h"
 #include "rclcpp_adapter/pixelformat_translation.h"
 #include "rclcpp_adapter/quilty_of_service_translation.cpp"
+
+// ============================================================================
+// Pixel Format Constants
+// ============================================================================
+// These constants define the PFNC (PixelFormat Naming Convention) values used
+// by Arena SDK for different image formats. Using named constants instead of
+// magic numbers improves code readability and maintainability.
+// Note: PFNC_BGR8 is already defined as a macro in Arena SDK's PFNC.h
+
+namespace PixelFormat {
+  // PolarizedAngles_0d_45d_90d_135d_BayerRG8 format
+  // Used by polarized cameras (e.g., PHX050S1-QC) that capture 4 polarization
+  // angles (0°, 45°, 90°, 135°) in a single Bayer pattern image.
+  // Each 2x2 Bayer quad contains one pixel for each polarization angle.
+  constexpr uint64_t PFNC_POLARIZED_BAYER_RG8 = 0x8220020F;
+}
+
+// ============================================================================
+// Helper Functions for Pixel Format Detection
+// ============================================================================
+
+/**
+ * @brief Check if the given pixel format is a polarized format
+ * @param format PFNC pixel format value from Arena SDK
+ * @return true if the format is a polarized format, false otherwise
+ */
+inline bool is_polarized_format(uint64_t format) {
+  return format == PixelFormat::PFNC_POLARIZED_BAYER_RG8;
+}
+
+/**
+ * @brief Check if the given pixel format is supported by this node
+ * @param format PFNC pixel format value from Arena SDK
+ * @return true if the format is supported, false otherwise
+ */
+inline bool is_supported_format(uint64_t format) {
+  // Currently we support:
+  // 1. Polarized format for PHX050S1-QC cameras
+  // 2. Any format that can be converted to BGR8 (handled by Arena SDK Convert)
+  // If format is polarized, we handle it specially
+  // Otherwise, we attempt conversion to BGR8
+  return true;  // We attempt to handle all formats via conversion
+}
+
+/**
+ * @brief Get a human-readable name for a pixel format
+ * @param format PFNC pixel format value from Arena SDK
+ * @return String describing the pixel format
+ */
+inline std::string get_pixel_format_name(uint64_t format) {
+  if (format == PixelFormat::PFNC_POLARIZED_BAYER_RG8) {
+    return "PolarizedAngles_0d_45d_90d_135d_BayerRG8";
+  } else if (format == PFNC_BGR8) {
+    return "BGR8";
+  } else {
+    return "Unknown (0x" + std::to_string(format) + ")";
+  }
+}
 
 void ArenaCameraNode::load_config_file_()
 {
@@ -183,23 +242,18 @@ void ArenaCameraNode::initialize_()
 {
   using namespace std::chrono_literals;
   // ARENASDK ---------------------------------------------------------------
-  // Custom deleter for system
+  // Use no-op deleters since cleanup is handled explicitly in the destructor
+  // to avoid accessing 'this' after partial destruction
   m_pSystem =
-      std::shared_ptr<Arena::ISystem>(nullptr, [=](Arena::ISystem* pSystem) {
-        if (pSystem) {  // this is an issue for multi devices
-          Arena::CloseSystem(pSystem);
-          log_info("System is destroyed");
-        }
+      std::shared_ptr<Arena::ISystem>(nullptr, [](Arena::ISystem*) {
+        // No-op: cleanup handled in destructor
       });
   m_pSystem.reset(Arena::OpenSystem());
 
-  // Custom deleter for device
+  // No-op deleter for device - cleanup handled in destructor
   m_pDevice =
-      std::shared_ptr<Arena::IDevice>(nullptr, [=](Arena::IDevice* pDevice) {
-        if (m_pSystem && pDevice) {
-          m_pSystem->DestroyDevice(pDevice);
-          log_info("Device is destroyed");
-        }
+      std::shared_ptr<Arena::IDevice>(nullptr, [](Arena::IDevice*) {
+        // No-op: cleanup handled in destructor
       });
 
   //
@@ -386,6 +440,7 @@ void ArenaCameraNode::run_()
   
   try {
     m_pDevice->StartStream();
+    m_is_streaming_.store(true);
     log_debug("StartStream() completed");
   } catch (GenICam::GenericException& e) {
     log_err(std::string("Failed to start stream: ") + e.what());
@@ -398,11 +453,10 @@ void ArenaCameraNode::run_()
   m_device_connected_ = true;
 
   if (!trigger_mode_activated_) {
-    log_info("Streaming started - publishing images to " + topic_);
-    // Use a timer for non-blocking image acquisition (1ms interval for high-speed capture)
-    using namespace std::chrono_literals;
-    m_image_acquisition_timer_ = this->create_wall_timer(
-        1ms, std::bind(&ArenaCameraNode::publish_one_image_, this));
+    log_info("Streaming started with event-driven callbacks - publishing images to " + topic_);
+    // Register callback handler for event-driven image acquisition
+    m_image_callback_handler_ = std::make_unique<ImageCallbackHandler>(this);
+    m_pDevice->RegisterImageCallback(m_image_callback_handler_.get());
   } else {
     log_info("Trigger mode enabled - waiting for trigger service calls");
   }
@@ -433,25 +487,26 @@ void ArenaCameraNode::publish_images_()
         
         // Skip compression for polarized formats on main topic
         // (compressed polarized data is available on pol_0deg/compressed topic)
-        if (pixel_format != 0x8220020F) { // Not PolarizedAngles_0d_45d_90d_135d_BayerRG8
+        if (!is_polarized_format(pixel_format)) {
           auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
           compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
           compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
           compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
           compressed_msg->format = compression_format_;
           
+          // Use RAII for converted image to ensure cleanup on exception
+          arena_camera::ArenaImagePtr converted_image;
           Arena::IImage* image_to_compress = nullptr;
-          bool need_cleanup = false;
           
           // Try to convert to BGR8 for compression compatibility
           try {
-            image_to_compress = Arena::ImageFactory::Convert(pImage, 0x02180015); // PFNC_BGR8
-            need_cleanup = true;
+            converted_image = arena_camera::make_arena_image_ptr(
+                Arena::ImageFactory::Convert(pImage, PFNC_BGR8));
+            image_to_compress = converted_image.get();
           } catch (...) {
             // If conversion fails, try the original format
             // This handles cases where the image is already in a JPEG-compatible format
             image_to_compress = pImage;
-            need_cleanup = false;
           }
           
           // Create cv::Mat and compress
@@ -477,9 +532,7 @@ void ArenaCameraNode::publish_images_()
             cv::imencode(".png", img_mat, compressed_msg->data, params);
           }
           
-          if (need_cleanup) {
-            Arena::ImageFactory::Destroy(image_to_compress);
-          }
+          // converted_image is automatically destroyed by RAII when going out of scope
           
           m_pub_compressed_->publish(std::move(compressed_msg));
         }
@@ -507,10 +560,11 @@ void ArenaCameraNode::publish_images_()
       // Extract and publish all polarization channels if format is polarized
       try {
         uint64_t pixel_format = pImage->GetPixelFormat();
-        // Check if this is a polarized format (0x8220020F = PolarizedAngles_0d_45d_90d_135d_BayerRG8)
-        if (pixel_format == 0x8220020F) {
-            // Use Arena SDK to split channels
-            std::vector<Arena::IImage*> channels = Arena::ImageFactory::SplitChannels(pImage);
+        // Check if this is a polarized format
+        if (is_polarized_format(pixel_format)) {
+            // Use Arena SDK to split channels - wrap in RAII for exception safety
+            arena_camera::ArenaImageVector channels(
+                Arena::ImageFactory::SplitChannels(pImage));
             
             if (channels.size() == 4) {
               // Define channel info: index, name, publisher, compressed_publisher
@@ -528,10 +582,11 @@ void ArenaCameraNode::publish_images_()
                 {3, "135deg", &m_pub_pol_135deg_, &m_pub_pol_135deg_compressed_}
               };
               
-              // Process each channel
+              // Process each channel - use RAII for converted BGR images
               for (const auto& info : channel_infos) {
-                // Convert channel from BayerRG8 to BGR8
-                Arena::IImage* bgr_image = Arena::ImageFactory::Convert(channels[info.index], 0x02180015); // PFNC_BGR8
+                // Convert channel from BayerRG8 to BGR8 with RAII wrapper
+                arena_camera::ArenaImagePtr bgr_image(
+                    Arena::ImageFactory::Convert(channels[info.index], PFNC_BGR8));
                 
                 // Publish raw polarization channel if enabled
                 if (publish_raw_ && *info.raw_pub) {
@@ -577,16 +632,15 @@ void ArenaCameraNode::publish_images_()
                   (*info.compressed_pub)->publish(std::move(compressed_msg));
                 }
                 
-                // Clean up converted BGR image
-                Arena::ImageFactory::Destroy(bgr_image);
+                // bgr_image is automatically destroyed by RAII when going out of scope
               }
               
               // Create max-combined image from all 4 polarization channels
-              if (publish_raw_ && m_pub_pol_max_ || publish_compressed_ && m_pub_pol_max_compressed_) {
-                // Convert all channels to BGR8 first
-                std::vector<Arena::IImage*> bgr_channels;
+              if ((publish_raw_ && m_pub_pol_max_) || (publish_compressed_ && m_pub_pol_max_compressed_)) {
+                // Convert all channels to BGR8 first - use RAII wrapper for exception safety
+                arena_camera::ArenaImageVector bgr_channels;
                 for (size_t i = 0; i < 4; i++) {
-                  bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], 0x02180015)); // PFNC_BGR8
+                  bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], PFNC_BGR8));
                 }
                 
                 // Get dimensions from first channel
@@ -643,17 +697,11 @@ void ArenaCameraNode::publish_images_()
                   m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
                 }
                 
-                // Clean up BGR channel images
-                for (auto* bgr : bgr_channels) {
-                  Arena::ImageFactory::Destroy(bgr);
-                }
+                // bgr_channels automatically cleaned up by RAII when going out of scope
               }
             }
             
-            // Clean up all channel images
-            for (auto* ch : channels) {
-              Arena::ImageFactory::Destroy(ch);
-            }
+            // channels automatically cleaned up by RAII when going out of scope
           }
       } catch (std::exception& e) {
         log_warn(std::string("Error extracting polarization channels: ") + e.what());
@@ -680,16 +728,60 @@ void ArenaCameraNode::publish_images_()
   };
 }
 
-void ArenaCameraNode::publish_one_image_()
+void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
 {
-  // Non-blocking single image acquisition callback for timer-based streaming
-  Arena::IImage* pImage = nullptr;
+  // Event-driven image handler called by ArenaSDK when new image arrives
+  
+  // Check if device is still valid and streaming (protects against race with destructor)
+  if (!m_pDevice || !m_is_streaming_.load()) {
+    log_debug("Skipping image acquisition - device shutting down");
+    return;
+  }
+  
+  // Backpressure detection: Skip this callback if still processing previous image
+  // This prevents queue buildup when image processing takes longer than frame arrival
+  bool expected = false;
+  if (!m_processing_image_.compare_exchange_strong(expected, true)) {
+    // Still processing previous image - skip this frame
+    m_backpressure_events_++;
+    if (m_backpressure_events_ % 100 == 1) {
+      // Log on 1st event and every 100th thereafter (1, 101, 201, ...) to catch initial issues
+      log_warn(std::string("Backpressure detected: skipping frame (total skipped: ") + 
+               std::to_string(m_backpressure_events_) + 
+               ", last processing time: " + std::to_string(m_last_processing_time_ms_) + "ms)");
+    }
+    return;
+  }
+  
+  // RAII scope guard to automatically reset processing flag on function exit
+  // This ensures the flag is always reset regardless of how we exit (return, exception, etc.)
+  struct ProcessingGuard {
+    std::atomic<bool>& flag;
+    explicit ProcessingGuard(std::atomic<bool>& f) : flag(f) {}
+    ~ProcessingGuard() { flag.store(false); }
+  } processing_guard(m_processing_image_);
+  
+  // Measure processing time
+  auto processing_start = std::chrono::steady_clock::now();
   
   try {
-    // Use a short timeout since we're being called frequently by timer
-    pImage = m_pDevice->GetImage(100);  // 100ms timeout
+    // Image is provided by callback - no GetImage() call needed
     if (!pImage) {
-      return;  // No image available, will try again on next timer callback
+      return;
+    }
+    
+    // Log pixel format on first image (for debugging/verification)
+    static bool format_logged = false;
+    if (!format_logged) {
+      uint64_t pixel_format = pImage->GetPixelFormat();
+      std::string format_info = "Camera pixel format detected: " + get_pixel_format_name(pixel_format);
+      if (is_polarized_format(pixel_format)) {
+        format_info += " (polarized camera - will extract 4 channels: 0°, 45°, 90°, 135°)";
+      } else {
+        format_info += " (standard camera - will convert to BGR8 for publishing)";
+      }
+      log_info(format_info);
+      format_logged = true;
     }
     
     // Publish raw image if enabled
@@ -704,22 +796,23 @@ void ArenaCameraNode::publish_one_image_()
       uint64_t pixel_format = pImage->GetPixelFormat();
       
       // Skip compression for polarized formats on main topic
-      if (pixel_format != 0x8220020F) { // Not PolarizedAngles_0d_45d_90d_135d_BayerRG8
+      if (!is_polarized_format(pixel_format)) {
         auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
         compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
         compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
         compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
         compressed_msg->format = compression_format_;
         
+        // Use RAII for converted image to ensure cleanup on exception
+        arena_camera::ArenaImagePtr converted_image;
         Arena::IImage* image_to_compress = nullptr;
-        bool need_cleanup = false;
         
         try {
-          image_to_compress = Arena::ImageFactory::Convert(pImage, 0x02180015); // PFNC_BGR8
-          need_cleanup = true;
+          converted_image = arena_camera::make_arena_image_ptr(
+              Arena::ImageFactory::Convert(pImage, PFNC_BGR8));
+          image_to_compress = converted_image.get();
         } catch (...) {
           image_to_compress = pImage;
-          need_cleanup = false;
         }
         
         int cvType = CV_8UC3;
@@ -742,9 +835,7 @@ void ArenaCameraNode::publish_one_image_()
           cv::imencode(".png", img_mat, compressed_msg->data, params);
         }
         
-        if (need_cleanup) {
-          Arena::ImageFactory::Destroy(image_to_compress);
-        }
+        // converted_image is automatically destroyed by RAII when going out of scope
         
         m_pub_compressed_->publish(std::move(compressed_msg));
       }
@@ -772,8 +863,10 @@ void ArenaCameraNode::publish_one_image_()
     // Extract and publish all polarization channels if format is polarized
     try {
       uint64_t pixel_format = pImage->GetPixelFormat();
-      if (pixel_format == 0x8220020F) {
-          std::vector<Arena::IImage*> channels = Arena::ImageFactory::SplitChannels(pImage);
+      if (is_polarized_format(pixel_format)) {
+          // Use RAII wrapper for exception safety
+          arena_camera::ArenaImageVector channels(
+              Arena::ImageFactory::SplitChannels(pImage));
           
           if (channels.size() == 4) {
             struct ChannelInfo {
@@ -790,8 +883,10 @@ void ArenaCameraNode::publish_one_image_()
               {3, "135deg", &m_pub_pol_135deg_, &m_pub_pol_135deg_compressed_}
             };
             
+            // Process each channel - use RAII for converted BGR images
             for (const auto& info : channel_infos) {
-              Arena::IImage* bgr_image = Arena::ImageFactory::Convert(channels[info.index], 0x02180015);
+              arena_camera::ArenaImagePtr bgr_image(
+                  Arena::ImageFactory::Convert(channels[info.index], PFNC_BGR8));
               
               if (publish_raw_ && *info.raw_pub) {
                 auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -834,14 +929,15 @@ void ArenaCameraNode::publish_one_image_()
                 (*info.compressed_pub)->publish(std::move(compressed_msg));
               }
               
-              Arena::ImageFactory::Destroy(bgr_image);
+              // bgr_image is automatically destroyed by RAII when going out of scope
             }
             
             // Create max-combined image
             if ((publish_raw_ && m_pub_pol_max_) || (publish_compressed_ && m_pub_pol_max_compressed_)) {
-              std::vector<Arena::IImage*> bgr_channels;
+              // Use RAII wrapper for exception safety
+              arena_camera::ArenaImageVector bgr_channels;
               for (size_t i = 0; i < 4; i++) {
-                bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], 0x02180015));
+                bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], PFNC_BGR8));
               }
               
               size_t height = bgr_channels[0]->GetHeight();
@@ -895,34 +991,41 @@ void ArenaCameraNode::publish_one_image_()
                 m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
               }
               
-              for (auto* ch : bgr_channels) {
-                Arena::ImageFactory::Destroy(ch);
-              }
+              // bgr_channels automatically cleaned up by RAII when going out of scope
             }
             
-            for (auto* ch : channels) {
-              Arena::ImageFactory::Destroy(ch);
-            }
+            // channels automatically cleaned up by RAII when going out of scope
           }
       }
     } catch (std::exception& e) {
       log_warn(std::string("Error extracting polarization channels: ") + e.what());
     }
     
-    this->m_pDevice->RequeueBuffer(pImage);
+    // Note: With callback-based acquisition, ArenaSDK manages the image lifecycle
+    // No manual RequeueBuffer needed - image is automatically returned when callback exits
+    
+    // Calculate and store processing time
+    auto processing_end = std::chrono::steady_clock::now();
+    m_last_processing_time_ms_ = std::chrono::duration<double, std::milli>(
+        processing_end - processing_start).count();
+    
+    // Update max processing time
+    if (m_last_processing_time_ms_ > m_max_processing_time_ms_) {
+      m_max_processing_time_ms_ = m_last_processing_time_ms_;
+    }
+    
+    // Update running average
+    m_total_processing_time_ms_ += m_last_processing_time_ms_;
+    m_processing_time_samples_++;
 
-  } catch (GenICam::TimeoutException& e) {
-    // Timeout is normal when camera is slow or no new frame available
-    // Just return and wait for next timer callback
-    return;
   } catch (std::exception& e) {
     m_image_publish_errors_++;
-    if (pImage) {
-      this->m_pDevice->RequeueBuffer(pImage);
-      pImage = nullptr;
-      log_err(std::string("Exception occurred while publishing an image: ") + e.what());
-    }
+    log_err(std::string("Exception occurred while publishing an image: ") + e.what());
+    // Note: With callbacks, image is automatically returned by ArenaSDK when callback exits
+    // processing_guard RAII will automatically reset m_processing_image_ flag
+    return;
   }
+  // Note: processing_guard RAII will automatically reset m_processing_image_ flag on exit
 }
 
 void ArenaCameraNode::msg_form_image_(Arena::IImage* pImage,
@@ -993,6 +1096,13 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     std::shared_ptr<std_srvs::srv::Trigger::Request> request /*unused*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
 {
+  // Check if device is still valid (protects against race with destructor)
+  if (!m_pDevice) {
+    response->message = "Device not available";
+    response->success = false;
+    return;
+  }
+  
   if (!trigger_mode_activated_) {
     std::string msg =
         "Failed to trigger image because the device is not in trigger mode."
@@ -1425,11 +1535,24 @@ void ArenaCameraNode::set_nodes_frame_rate_()
                (acquisition_frame_rate_enable_ ? "true" : "false"));
     }
     
+    // Determine if frame rate control is enabled (either explicitly set or from camera)
+    bool frame_rate_enabled = is_passed_acquisition_frame_rate_enable_ 
+        ? acquisition_frame_rate_enable_ 
+        : Arena::GetNodeValue<bool>(nodemap, "AcquisitionFrameRateEnable");
+    
+    // If frame rate control is disabled, log and skip setting the frame rate value
+    if (!frame_rate_enabled) {
+      if (is_passed_acquisition_frame_rate_) {
+        log_info("\tFrame rate value specified but acquisition_frame_rate_enable is false. "
+                 "Frame rate control disabled, camera will run at maximum rate.");
+      } else {
+        log_debug("\tFrame rate control disabled, camera will run at maximum rate.");
+      }
+      return;
+    }
+    
     // Set frame rate value if specified and enabled
-    if (is_passed_acquisition_frame_rate_ && 
-        (is_passed_acquisition_frame_rate_enable_ ? acquisition_frame_rate_enable_ : 
-         Arena::GetNodeValue<bool>(nodemap, "AcquisitionFrameRateEnable"))) {
-      
+    if (is_passed_acquisition_frame_rate_) {
       // Get the node to validate min/max
       GenApi::CFloatPtr pAcquisitionFrameRate = nodemap->GetNode("AcquisitionFrameRate");
       
@@ -1448,11 +1571,28 @@ void ArenaCameraNode::set_nodes_frame_rate_()
           frame_rate = pAcquisitionFrameRate->GetMax();
         }
         
+        // Validate frame rate vs exposure time conflict
+        // Frame rate and exposure time are interdependent:
+        //   - max_exposure_time (in microseconds) ≈ 1,000,000 / frame_rate
+        // If the configured exposure time exceeds this limit, warn the user
+        if (is_passed_exposure_time_ && frame_rate > 0) {
+          // Calculate max exposure time in microseconds for given frame rate
+          double max_exposure_for_frame_rate = 1000000.0 / frame_rate;
+          if (exposure_time_ > max_exposure_for_frame_rate) {
+            log_warn(std::string("\tPotential conflict: Configured exposure time (") + 
+                     std::to_string(exposure_time_) + " us) exceeds maximum allowed by frame rate (" +
+                     std::to_string(max_exposure_for_frame_rate) + " us at " + 
+                     std::to_string(frame_rate) + " FPS). The camera may limit actual exposure time.");
+          }
+        }
+        
         Arena::SetNodeValue<double>(nodemap, "AcquisitionFrameRate", frame_rate);
         log_info(std::string("\tAcquisitionFrameRate set to ") + std::to_string(frame_rate) + " FPS");
       } else {
         log_warn("\tAcquisitionFrameRate node not writable");
       }
+    } else {
+      log_info("\tFrame rate control enabled but no frame rate value specified. Using camera default.");
     }
   } catch (GenICam::GenericException& e) {
     log_warn(std::string("\tFrame rate configuration warning: ") + e.what());
@@ -1514,9 +1654,16 @@ void ArenaCameraNode::set_nodes_test_pattern_image_()
 void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat)
 {
   if (m_device_connected_) {
-    if (m_image_publish_errors_ > 0) {
-      stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN,
-                   "Camera connected with errors");
+    if (m_image_publish_errors_ > 0 || m_backpressure_events_ > 0) {
+      std::string warn_msg = "Camera connected with";
+      if (m_image_publish_errors_ > 0) {
+        warn_msg += " errors";
+      }
+      if (m_backpressure_events_ > 0) {
+        if (m_image_publish_errors_ > 0) warn_msg += " and";
+        warn_msg += " backpressure";
+      }
+      stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, warn_msg);
     } else {
       stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK,
                    "Camera operating normally");
@@ -1532,6 +1679,18 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
   stat.add("Calculated FPS", std::to_string(m_calculated_fps_));
   stat.add("Trigger Mode", trigger_mode_activated_ ? "enabled" : "disabled");
   stat.add("Topic", topic_);
+  
+  // Backpressure metrics (Task 4)
+  stat.add("Backpressure Events", std::to_string(m_backpressure_events_));
+  stat.add("Last Processing Time (ms)", std::to_string(m_last_processing_time_ms_));
+  stat.add("Max Processing Time (ms)", std::to_string(m_max_processing_time_ms_));
+  if (m_processing_time_samples_ > 0) {
+    double avg_processing_time = m_total_processing_time_ms_ / m_processing_time_samples_;
+    stat.add("Avg Processing Time (ms)", std::to_string(avg_processing_time));
+  } else {
+    stat.add("Avg Processing Time (ms)", "N/A");
+  }
+  stat.add("Processing Time Samples", std::to_string(m_processing_time_samples_));
 
   if (m_device_connected_) {
     stat.add("Serial", serial_.empty() ? "first discovered" : serial_);
@@ -1635,6 +1794,38 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
       try {
         bool short_exposure_enable = Arena::GetNodeValue<bool>(nodemap, "ShortExposureEnable");
         stat.add("ShortExposureEnable", short_exposure_enable ? "true" : "false");
+      } catch (...) {
+        // If not available, skip
+      }
+      
+      // Device power
+      try {
+        double device_power = Arena::GetNodeValue<double>(nodemap, "DevicePower");
+        stat.add("DevicePower (W)", std::to_string(device_power));
+      } catch (...) {
+        // If not available, skip
+      }
+      
+      // Device uptime
+      try {
+        int64_t device_uptime = Arena::GetNodeValue<int64_t>(nodemap, "DeviceUpTime");
+        stat.add("DeviceUpTime (ms)", std::to_string(device_uptime));
+      } catch (...) {
+        // If not available, skip
+      }
+      
+      // Link uptime
+      try {
+        int64_t link_uptime = Arena::GetNodeValue<int64_t>(nodemap, "LinkUpTime");
+        stat.add("LinkUpTime (ms)", std::to_string(link_uptime));
+      } catch (...) {
+        // If not available, skip
+      }
+      
+      // Device temperature
+      try {
+        double device_temperature = Arena::GetNodeValue<double>(nodemap, "DeviceTemperature");
+        stat.add("DeviceTemperature (°C)", std::to_string(device_temperature));
       } catch (...) {
         // If not available, skip
       }
