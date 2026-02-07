@@ -27,12 +27,9 @@
 // These constants define the PFNC (PixelFormat Naming Convention) values used
 // by Arena SDK for different image formats. Using named constants instead of
 // magic numbers improves code readability and maintainability.
+// Note: PFNC_BGR8 is already defined as a macro in Arena SDK's PFNC.h
 
 namespace PixelFormat {
-  // BGR8 format (3 channels, 8 bits per channel, Blue-Green-Red order)
-  // Used for standard color images compatible with OpenCV and JPEG compression
-  constexpr uint64_t PFNC_BGR8 = 0x02180015;
-  
   // PolarizedAngles_0d_45d_90d_135d_BayerRG8 format
   // Used by polarized cameras (e.g., PHX050S1-QC) that capture 4 polarization
   // angles (0°, 45°, 90°, 135°) in a single Bayer pattern image.
@@ -75,7 +72,7 @@ inline bool is_supported_format(uint64_t format) {
 inline std::string get_pixel_format_name(uint64_t format) {
   if (format == PixelFormat::PFNC_POLARIZED_BAYER_RG8) {
     return "PolarizedAngles_0d_45d_90d_135d_BayerRG8";
-  } else if (format == PixelFormat::PFNC_BGR8) {
+  } else if (format == PFNC_BGR8) {
     return "BGR8";
   } else {
     return "Unknown (0x" + std::to_string(format) + ")";
@@ -485,7 +482,7 @@ void ArenaCameraNode::publish_images_()
           // Try to convert to BGR8 for compression compatibility
           try {
             converted_image = arena_camera::make_arena_image_ptr(
-                Arena::ImageFactory::Convert(pImage, PixelFormat::PFNC_BGR8));
+                Arena::ImageFactory::Convert(pImage, PFNC_BGR8));
             image_to_compress = converted_image.get();
           } catch (...) {
             // If conversion fails, try the original format
@@ -561,7 +558,7 @@ void ArenaCameraNode::publish_images_()
               for (const auto& info : channel_infos) {
                 // Convert channel from BayerRG8 to BGR8 with RAII wrapper
                 arena_camera::ArenaImagePtr bgr_image(
-                    Arena::ImageFactory::Convert(channels[info.index], PixelFormat::PFNC_BGR8));
+                    Arena::ImageFactory::Convert(channels[info.index], PFNC_BGR8));
                 
                 // Publish raw polarization channel if enabled
                 if (publish_raw_ && *info.raw_pub) {
@@ -607,7 +604,7 @@ void ArenaCameraNode::publish_images_()
                 // Convert all channels to BGR8 first - use RAII wrapper for exception safety
                 arena_camera::ArenaImageVector bgr_channels;
                 for (size_t i = 0; i < 4; i++) {
-                  bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], PixelFormat::PFNC_BGR8));
+                  bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], PFNC_BGR8));
                 }
                 
                 // Get dimensions from first channel
@@ -769,7 +766,7 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
         
         try {
           converted_image = arena_camera::make_arena_image_ptr(
-              Arena::ImageFactory::Convert(pImage, PixelFormat::PFNC_BGR8));
+              Arena::ImageFactory::Convert(pImage, PFNC_BGR8));
           image_to_compress = converted_image.get();
         } catch (...) {
           image_to_compress = pImage;
@@ -839,7 +836,7 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
             // Process each channel - use RAII for converted BGR images
             for (const auto& info : channel_infos) {
               arena_camera::ArenaImagePtr bgr_image(
-                  Arena::ImageFactory::Convert(channels[info.index], PixelFormat::PFNC_BGR8));
+                  Arena::ImageFactory::Convert(channels[info.index], PFNC_BGR8));
               
               if (publish_raw_ && *info.raw_pub) {
                 auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -882,7 +879,7 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
               // Use RAII wrapper for exception safety
               arena_camera::ArenaImageVector bgr_channels;
               for (size_t i = 0; i < 4; i++) {
-                bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], PixelFormat::PFNC_BGR8));
+                bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], PFNC_BGR8));
               }
               
               size_t height = bgr_channels[0]->GetHeight();
