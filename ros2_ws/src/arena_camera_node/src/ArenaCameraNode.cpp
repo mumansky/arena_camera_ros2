@@ -118,7 +118,9 @@ inline std::string get_pixel_format_name(uint64_t format) {
   } else if (format == PFNC_BGR8) {
     return "BGR8";
   } else {
-    return "Unknown (0x" + std::to_string(format) + ")";
+    char buf[32];
+    snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(format));
+    return std::string("Unknown (") + buf + ")";
   }
 }
 
