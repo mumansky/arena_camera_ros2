@@ -9,9 +9,10 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
-#include <vector>
 #include <utility>
+#include <vector>
 #include "ArenaApi.h"
 
 namespace arena_camera {

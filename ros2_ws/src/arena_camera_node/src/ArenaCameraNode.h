@@ -1,5 +1,6 @@
 #pragma once
 
+#include <type_traits>
 #include <yaml-cpp/yaml.h>
 
 // TODO
@@ -11,8 +12,14 @@
 
 // std
 #include <atomic>      // std::atomic for thread-safe flags (streaming state, backpressure)
-#include <chrono>      //chrono_literals
-#include <functional>  // std::bind , std::placeholders
+#include <chrono>      // chrono_literals
+#include <cstddef>     // size_t
+#include <cstdint>     // int64_t
+#include <cstdio>      // setvbuf, stdout, BUFSIZ
+#include <exception>   // std::exception
+#include <functional>  // std::bind, std::placeholders
+#include <memory>      // std::shared_ptr, std::unique_ptr
+#include <string>      // std::string
 
 // ros
 #include <rclcpp/rclcpp.hpp>
