@@ -7,10 +7,12 @@ if(NOT CMAKE_C_STANDARD)
   set(CMAKE_C_STANDARD 99)
 endif()
 
-# Default to C++14
+# Default to C++17
 if(NOT CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 14)
+  set(CMAKE_CXX_STANDARD 17)
 endif()
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 	# linked GenICam hearders give warnings No such file or directory
@@ -44,13 +46,12 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
 # - even if a dependency is used in one package, it has to be found
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(std_msgs REQUIRED)
-find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(diagnostic_updater REQUIRED)
-find_package(OpenCV REQUIRED)
-find_package(arena_sdk REQUIRED)
 find_package(yaml-cpp REQUIRED)
+find_package(arena_sdk REQUIRED)
+find_package(OpenCV REQUIRED)
 
 # ------------
 # EXPORT DEPS
@@ -120,14 +121,14 @@ add_executable(${target_name}
     src/rclcpp_adapter/quilty_of_service_translation.cpp
 )
 
-# HEADERS DEP
-#target_include_directories(${target_name}
-  #PRIVATE
-    #${arena_sdk_INCLUDE_DIRS}
-#  PUBLIC
-    #$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    #$<INSTALL_INTERFACE:include>
-#)
+target_include_directories(${target_name}
+  PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+    ${ARENA_SDK_INCLUDE_DIRS}
+)
+
+# Ensure C++17 for this target so std::is_convertible_v is available
+target_compile_features(${target_name} PUBLIC cxx_std_17)
 
 # CPP -> .a file
 # creates :
@@ -190,6 +191,9 @@ target_include_directories(${trigger_image}
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
+
+# Ensure C++17 for the trigger_image target as well
+target_compile_features(${trigger_image} PUBLIC cxx_std_17)
 
 # MV EXEC to lib dir
 install(TARGETS
@@ -266,6 +270,12 @@ if(BUILD_TESTING)
     arena_sdk
     OpenCV
   )
+
+  # Config helper and pixel format utility tests
+  ament_add_gtest(test_config_helpers
+    test/test_config_helpers.cpp
+  )
+  target_link_libraries(test_config_helpers yaml-cpp)
 endif()
 
 ament_package()

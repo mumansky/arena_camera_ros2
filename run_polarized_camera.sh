@@ -12,6 +12,26 @@ echo "  Arena Camera ROS2 - Polarized Camera Mode  "
 echo "=============================================="
 echo ""
 
+show_usage() {
+  echo "Usage: $0 [--help]"
+  echo "Environment overrides:"
+  echo "  PIXELFORMAT  Default: polarized_angles_0d_45d_90d_135d_bayer_rg8"
+  echo "  TOPIC        Default: /arena_camera_node/images"
+  echo "  LOG_LEVEL    Default: info"
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      show_usage
+      exit 0
+      ;;
+    *)
+      echo "Ignoring unknown option: $arg"
+      ;;
+  esac
+done
+
 # Source ROS2
 echo "Sourcing ROS2 Humble..."
 source /opt/ros/humble/setup.bash

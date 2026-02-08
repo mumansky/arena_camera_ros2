@@ -1,5 +1,6 @@
 # Arena Camera ROS2 Node Configuration
-# This file contains all available parameters for the arena_camera_node
+# This file is the single source of truth for all camera parameters.
+# All parameters are read from this file on startup.
 
 /**:
   ros__parameters:
@@ -15,10 +16,27 @@
     
     # QoS Settings
     # ------------
-    # Quality of Service settings for the image publisher
-    # qos_history: "keep_last"  # Options: "keep_last", "keep_all"
-    # qos_history_depth: 10     # Number of messages to keep in history (only used with "keep_last")
-    # qos_reliability: "reliable"  # Options: "reliable", "best_effort"
+    # Quality of Service settings for the image publisher.
+    # These control how image messages are delivered to subscribers.
+    #
+    # qos_history: Controls how messages are stored in the publisher queue.
+    #   - "keep_last": Only keep the last N messages (set N with qos_history_depth)
+    #   - "keep_all": Keep all messages until delivered (may use more memory)
+    #   Default: SensorDataQoS default (keep_last with depth 5)
+    # qos_history: "keep_last"
+    #
+    # qos_history_depth: Number of messages to keep in history (only used with "keep_last").
+    #   Higher values allow subscribers to catch up after brief stalls.
+    #   Lower values reduce memory usage.
+    #   Default: SensorDataQoS default (5)
+    # qos_history_depth: 5
+    #
+    # qos_reliability: Controls delivery guarantee.
+    #   - "reliable": Guarantees delivery (retransmits if needed). Use for recording/logging.
+    #   - "best_effort": No retransmission. Lowest latency, but messages can be dropped.
+    #     Use for live streaming/visualization.
+    #   Default: SensorDataQoS default (best_effort)
+    # qos_reliability: "best_effort"
     
     # Image Resolution
     # ----------------
@@ -108,6 +126,15 @@
     # Recommended range: 50-90
     jpeg_quality: 50
 
+    # Watchdog / Heartbeat
+    # --------------------
+    # Time in seconds without a new frame before the camera is declared frozen.
+    # When exceeded, diagnostics reports ERROR status and a log message is emitted.
+    # The watchdog is only active in continuous (non-trigger) mode.
+    # Set to 0 to disable the watchdog.
+    # Default: 5.0
+    watchdog_timeout_sec: 5.0
+
 # Example configurations for common use cases:
 # ============================================
 
@@ -136,3 +163,13 @@
 # Both Raw and Compressed (maximum compatibility):
 # publish_raw: true
 # publish_compressed: true
+
+# Low Latency Streaming (for live visualization):
+# qos_reliability: "best_effort"
+# qos_history: "keep_last"
+# qos_history_depth: 1
+
+# Reliable Recording (no dropped frames):
+# qos_reliability: "reliable"
+# qos_history: "keep_last"
+# qos_history_depth: 10

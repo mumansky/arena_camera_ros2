@@ -1,5 +1,48 @@
-#include <cstring>    // memcopy
-#include <stdexcept>  // std::runtime_err
+/**
+ * @file ArenaCameraNode.cpp
+ * @brief ROS2 node for LUCID (Arena) cameras
+ *
+ * This file implements the ArenaCameraNode class which uses the ArenaSDK C++ API
+ * to discover and stream images from LUCID cameras (e.g., PHX050S1-QC polarized cameras).
+ *
+ * == Pixel Format Reference ==
+ * The node works with PFNC (PixelFormat Naming Convention) values from Arena SDK:
+ *   - PFNC_BGR8 (0x02180015): 3-channel Blue-Green-Red, 8 bits per channel.
+ *     This is the standard output format for OpenCV and compressed image publishing.
+ *   - PFNC_POLARIZED_BAYER_RG8 (0x8220020F): Polarized 4-angle Bayer pattern.
+ *     Used by PHX050S1-QC cameras. Each 2x2 superpixel contains one pixel for each
+ *     of 4 polarization angles (0°, 45°, 90°, 135°) in a BayerRG8 pattern.
+ *
+ * == Polarization Channel Ordering ==
+ * When the polarized format is detected, ImageFactory::SplitChannels() returns
+ * a vector of 4 images in this order:
+ *   channels[0] = 0° polarization angle
+ *   channels[1] = 45° polarization angle
+ *   channels[2] = 90° polarization angle
+ *   channels[3] = 135° polarization angle
+ * Each channel is in BayerRG8 format and must be converted to BGR8 before publishing.
+ *
+ * == Timeout Values ==
+ *   - Device discovery timeout: 100ms (UpdateDevices call)
+ *   - GetImage timeout: 1000ms (1 second) for blocking image retrieval
+ *   - Device connection timer: 1s interval for polling camera availability
+ *   - FPS calculation window: 1000ms (1 second rolling window)
+ *   - Watchdog timeout: configurable via watchdog_timeout_sec (default 5.0s)
+ *
+ * == Architecture ==
+ * The node operates in two modes:
+ *   1. Continuous mode (default): Uses ArenaSDK callbacks (RegisterImageCallback)
+ *      for event-driven image acquisition. The handle_camera_image_() method
+ *      processes each frame as it arrives.
+ *   2. Trigger mode: Waits for service calls via the trigger_image service.
+ *      Uses blocking GetImage() in publish_an_image_on_trigger_().
+ *
+ * The legacy blocking publish_images_() loop is retained but not used in the
+ * current callback-based architecture.
+ */
+
+#include <cstring>    // memcpy
+#include <stdexcept>  // std::runtime_error
 #include <string>
 #include <fstream>    // file I/O
 #include <vector>     // vector
@@ -75,8 +118,37 @@ inline std::string get_pixel_format_name(uint64_t format) {
   } else if (format == PFNC_BGR8) {
     return "BGR8";
   } else {
-    return "Unknown (0x" + std::to_string(format) + ")";
+    char buf[32];
+    snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(format));
+    return std::string("Unknown (") + buf + ")";
   }
+}
+
+/**
+ * @brief Validate that an image has the expected BGR8 pixel format after conversion.
+ *
+ * Arena SDK's ImageFactory::Convert() is expected to produce BGR8 output when
+ * requested. BGR8 (PFNC value 0x02180015) uses 3 bytes per pixel in Blue-Green-Red
+ * order and is the format assumed by downstream OpenCV operations (cv::Mat CV_8UC3)
+ * and ROS message encoding ("bgr8"). If conversion produces a different format,
+ * image data would be silently misinterpreted.
+ *
+ * @param image Pointer to the converted Arena::IImage
+ * @param context Description of where the conversion happened (for log messages)
+ * @return true if the format is BGR8, false otherwise
+ */
+inline bool validate_bgr8_format(Arena::IImage* image, const std::string& context) {
+  if (!image) return false;
+  uint64_t actual = image->GetPixelFormat();
+  if (actual != PFNC_BGR8) {
+    // Log as error since downstream code assumes BGR8 layout
+    RCLCPP_ERROR(rclcpp::get_logger("arena_camera_node"),
+        "Unexpected pixel format after conversion in %s: expected BGR8 (0x%lx), got 0x%lx. "
+        "Image data may be corrupted.",
+        context.c_str(), static_cast<unsigned long>(PFNC_BGR8), static_cast<unsigned long>(actual));
+    return false;
+  }
+  return true;
 }
 
 void ArenaCameraNode::load_config_file_()
@@ -129,92 +201,224 @@ void ArenaCameraNode::load_config_file_()
   }
 }
 
+/**
+ * @brief Helper to safely read a string value from YAML config
+ * @param config YAML node to read from
+ * @param key Parameter key name
+ * @param default_val Default value if key not found or conversion fails
+ * @return The parameter value or default
+ */
+static std::string config_string(const YAML::Node& config, const std::string& key, const std::string& default_val)
+{
+  try {
+    if (config && config[key]) {
+      return config[key].as<std::string>();
+    }
+  } catch (const YAML::Exception&) {
+    // Type conversion failed; fall through to default
+  }
+  return default_val;
+}
+
+/**
+ * @brief Helper to safely read a bool value from YAML config
+ * @param config YAML node to read from
+ * @param key Parameter key name
+ * @param default_val Default value if key not found or conversion fails
+ * @return The parameter value or default
+ */
+static bool config_bool(const YAML::Node& config, const std::string& key, bool default_val)
+{
+  try {
+    if (config && config[key]) {
+      return config[key].as<bool>();
+    }
+  } catch (const YAML::Exception&) {
+    // Type conversion failed; fall through to default
+  }
+  return default_val;
+}
+
+/**
+ * @brief Helper to safely read a double value from YAML config
+ * @param config YAML node to read from
+ * @param key Parameter key name
+ * @param default_val Default value if key not found or conversion fails
+ * @return The parameter value or default
+ */
+static double config_double(const YAML::Node& config, const std::string& key, double default_val)
+{
+  try {
+    if (config && config[key]) {
+      return config[key].as<double>();
+    }
+  } catch (const YAML::Exception&) {
+    // Type conversion failed; fall through to default
+  }
+  return default_val;
+}
+
+/**
+ * @brief Helper to safely read an int64 value from YAML config
+ * @param config YAML node to read from
+ * @param key Parameter key name
+ * @param default_val Default value if key not found or conversion fails
+ * @return The parameter value or default
+ */
+static int64_t config_int64(const YAML::Node& config, const std::string& key, int64_t default_val)
+{
+  try {
+    if (config && config[key]) {
+      return config[key].as<int64_t>();
+    }
+  } catch (const YAML::Exception&) {
+    // Type conversion failed; fall through to default
+  }
+  return default_val;
+}
+
+/**
+ * @brief Helper to safely read an int value from YAML config
+ * @param config YAML node to read from
+ * @param key Parameter key name
+ * @param default_val Default value if key not found or conversion fails
+ * @return The parameter value or default
+ */
+static int config_int(const YAML::Node& config, const std::string& key, int default_val)
+{
+  try {
+    if (config && config[key]) {
+      return config[key].as<int>();
+    }
+  } catch (const YAML::Exception&) {
+    // Type conversion failed; fall through to default
+  }
+  return default_val;
+}
+
+/**
+ * @brief Helper to check if a key exists in YAML config
+ * @param config YAML node to check
+ * @param key Parameter key name
+ * @return true if key exists, false otherwise
+ */
+static bool config_has(const YAML::Node& config, const std::string& key)
+{
+  return config && config[key];
+}
+
 void ArenaCameraNode::parse_parameters_()
 {
-  std::string nextParameterToDeclare = "";
+  std::string currentParam = "";
   try {
-    nextParameterToDeclare = "topic";
-    std::string topic_default = (m_config_params_ && m_config_params_["topic"]) ?
-                      m_config_params_["topic"].as<std::string>() : "/arena_camera_node/images";
-    topic_ = this->declare_parameter("topic", topic_default);
+    // All parameters are read from camera.yaml (the single source of truth).
+    // Type conversion errors are caught and logged; defaults are used on failure.
+
+    currentParam = "topic";
+    topic_ = config_string(m_config_params_, "topic", "/arena_camera_node/images");
     is_passed_topic_ = topic_ != "/arena_camera_node/images";
 
-    nextParameterToDeclare = "auto_exposure";
-    std::string auto_exposure_default = (m_config_params_ && m_config_params_["auto_exposure"]) ?
-                      m_config_params_["auto_exposure"].as<std::string>() : "";
-    auto_exposure_ = this->declare_parameter("auto_exposure", auto_exposure_default);
-    is_passed_auto_exposure_ = auto_exposure_ != "";
+    currentParam = "serial";
+    serial_ = config_string(m_config_params_, "serial", "");
+    is_passed_serial_ = !serial_.empty();
 
-    nextParameterToDeclare = "target_brightness";
-    int64_t target_brightness_default = (m_config_params_ && m_config_params_["target_brightness"]) ?
-                                        m_config_params_["target_brightness"].as<int64_t>() : -1;
-    target_brightness_ = this->declare_parameter("target_brightness", target_brightness_default);
+    currentParam = "pixelformat";
+    pixelformat_ros_ = config_string(m_config_params_, "pixelformat", "");
+    is_passed_pixelformat_ros_ = !pixelformat_ros_.empty();
+
+    currentParam = "width";
+    width_ = static_cast<size_t>(config_int64(m_config_params_, "width", 0));
+    is_passed_width = width_ > 0;
+
+    currentParam = "height";
+    height_ = static_cast<size_t>(config_int64(m_config_params_, "height", 0));
+    is_passed_height = height_ > 0;
+
+    currentParam = "gain";
+    gain_ = config_double(m_config_params_, "gain", -1.0);
+    is_passed_gain_ = gain_ >= 0.0;
+
+    currentParam = "auto_gain";
+    auto_gain_ = config_string(m_config_params_, "auto_gain", "");
+    is_passed_auto_gain_ = !auto_gain_.empty();
+
+    currentParam = "exposure_time";
+    exposure_time_ = config_double(m_config_params_, "exposure_time", -1.0);
+    is_passed_exposure_time_ = exposure_time_ >= 0.0;
+
+    currentParam = "auto_exposure";
+    auto_exposure_ = config_string(m_config_params_, "auto_exposure", "");
+    is_passed_auto_exposure_ = !auto_exposure_.empty();
+
+    currentParam = "short_exposure_enable";
+    short_exposure_enable_ = config_bool(m_config_params_, "short_exposure_enable", false);
+    is_passed_short_exposure_enable_ = short_exposure_enable_;
+
+    currentParam = "exposure_auto_algorithm";
+    exposure_auto_algorithm_ = config_string(m_config_params_, "exposure_auto_algorithm", "");
+    is_passed_exposure_auto_algorithm_ = !exposure_auto_algorithm_.empty();
+
+    currentParam = "target_brightness";
+    target_brightness_ = config_int64(m_config_params_, "target_brightness", -1);
     is_passed_target_brightness_ = target_brightness_ >= 0;
 
-    // Set defaults for other internal parameters that are used but not exposed as ROS parameters
-    serial_ = "";
-    is_passed_serial_ = false;
-    pixelformat_ros_ = (m_config_params_ && m_config_params_["pixelformat"]) ?
-                       m_config_params_["pixelformat"].as<std::string>() : "";
-    is_passed_pixelformat_ros_ = pixelformat_ros_ != "";
-    width_ = 0;
-    is_passed_width = false;
-    height_ = 0;
-    is_passed_height = false;
-    gain_ = -1.0;
-    is_passed_gain_ = false;
-    auto_gain_ = "";
-    is_passed_auto_gain_ = false;
-    exposure_time_ = -1.0;
-    is_passed_exposure_time_ = false;
-    short_exposure_enable_ = false;
-    is_passed_short_exposure_enable_ = false;
-    exposure_auto_algorithm_ = "";
-    is_passed_exposure_auto_algorithm_ = false;
-    exposure_auto_damping_ = -1.0;
-    is_passed_exposure_auto_damping_ = false;
-    exposure_auto_limit_auto_ = "";
-    is_passed_exposure_auto_limit_auto_ = false;
-    exposure_auto_upper_limit_ = -1.0;
-    is_passed_exposure_auto_upper_limit_ = false;
-    exposure_auto_lower_limit_ = -1.0;
-    is_passed_exposure_auto_lower_limit_ = false;
-    acquisition_frame_rate_enable_ = false;
-    is_passed_acquisition_frame_rate_enable_ = false;
-    acquisition_frame_rate_ = -1.0;
-    is_passed_acquisition_frame_rate_ = false;
-    trigger_mode_activated_ = (m_config_params_ && m_config_params_["trigger_mode"]) ?
-                              m_config_params_["trigger_mode"].as<bool>() : false;
-    
-    // Read other config parameters
-    auto_gain_ = (m_config_params_ && m_config_params_["auto_gain"]) ?
-                 m_config_params_["auto_gain"].as<std::string>() : "";
-    is_passed_auto_gain_ = auto_gain_ != "";
-    
-    short_exposure_enable_ = (m_config_params_ && m_config_params_["short_exposure_enable"]) ?
-                             m_config_params_["short_exposure_enable"].as<bool>() : false;
-    is_passed_short_exposure_enable_ = short_exposure_enable_;
-    
-    pub_qos_history_ = "";
-    is_passed_pub_qos_history_ = false;
-    pub_qos_history_depth_ = 0;
-    is_passed_pub_qos_history_depth_ = false;
-    pub_qos_reliability_ = "";
-    is_passed_pub_qos_reliability_ = false;
-    
-    // Read publish flags from config file
-    publish_raw_ = (m_config_params_ && m_config_params_["publish_raw"]) ?
-                   m_config_params_["publish_raw"].as<bool>() : true;
-    publish_compressed_ = (m_config_params_ && m_config_params_["publish_compressed"]) ?
-                          m_config_params_["publish_compressed"].as<bool>() : false;
-    jpeg_quality_ = (m_config_params_ && m_config_params_["jpeg_quality"]) ?
-                    m_config_params_["jpeg_quality"].as<int>() : 80;
+    currentParam = "exposure_auto_damping";
+    exposure_auto_damping_ = config_double(m_config_params_, "exposure_auto_damping", -1.0);
+    is_passed_exposure_auto_damping_ = exposure_auto_damping_ >= 0.0;
 
-  } catch (rclcpp::ParameterTypeException& e) {
-    log_err("Parameter exception for: " + nextParameterToDeclare + " - " + std::string(e.what()));
-    throw;
+    currentParam = "exposure_auto_limit_auto";
+    exposure_auto_limit_auto_ = config_string(m_config_params_, "exposure_auto_limit_auto", "");
+    is_passed_exposure_auto_limit_auto_ = !exposure_auto_limit_auto_.empty();
+
+    currentParam = "exposure_auto_upper_limit";
+    exposure_auto_upper_limit_ = config_double(m_config_params_, "exposure_auto_upper_limit", -1.0);
+    is_passed_exposure_auto_upper_limit_ = exposure_auto_upper_limit_ >= 0.0;
+
+    currentParam = "exposure_auto_lower_limit";
+    exposure_auto_lower_limit_ = config_double(m_config_params_, "exposure_auto_lower_limit", -1.0);
+    is_passed_exposure_auto_lower_limit_ = exposure_auto_lower_limit_ >= 0.0;
+
+    currentParam = "acquisition_frame_rate_enable";
+    acquisition_frame_rate_enable_ = config_bool(m_config_params_, "acquisition_frame_rate_enable", false);
+    is_passed_acquisition_frame_rate_enable_ = config_has(m_config_params_, "acquisition_frame_rate_enable");
+
+    currentParam = "acquisition_frame_rate";
+    acquisition_frame_rate_ = config_double(m_config_params_, "acquisition_frame_rate", -1.0);
+    is_passed_acquisition_frame_rate_ = acquisition_frame_rate_ >= 0.0;
+
+    currentParam = "trigger_mode";
+    trigger_mode_activated_ = config_bool(m_config_params_, "trigger_mode", false);
+
+    // QoS settings
+    currentParam = "qos_history";
+    pub_qos_history_ = config_string(m_config_params_, "qos_history", "");
+    is_passed_pub_qos_history_ = !pub_qos_history_.empty();
+
+    currentParam = "qos_history_depth";
+    pub_qos_history_depth_ = static_cast<size_t>(config_int64(m_config_params_, "qos_history_depth", 0));
+    is_passed_pub_qos_history_depth_ = config_has(m_config_params_, "qos_history_depth") && pub_qos_history_depth_ > 0;
+
+    currentParam = "qos_reliability";
+    pub_qos_reliability_ = config_string(m_config_params_, "qos_reliability", "");
+    is_passed_pub_qos_reliability_ = !pub_qos_reliability_.empty();
+
+    // Image publishing options
+    currentParam = "publish_raw";
+    publish_raw_ = config_bool(m_config_params_, "publish_raw", true);
+
+    currentParam = "publish_compressed";
+    publish_compressed_ = config_bool(m_config_params_, "publish_compressed", false);
+
+    currentParam = "jpeg_quality";
+    jpeg_quality_ = config_int(m_config_params_, "jpeg_quality", 80);
+
+    // Watchdog settings (Task 20)
+    currentParam = "watchdog_timeout_sec";
+    watchdog_timeout_sec_ = config_double(m_config_params_, "watchdog_timeout_sec", 5.0);
+
   } catch (std::exception& e) {
-    log_err("General exception in parse_parameters_(): " + std::string(e.what()));
+    log_err("Error parsing parameter '" + currentParam + "': " + std::string(e.what()) +
+            ". Check that the value type matches the expected type in camera.yaml.");
     throw;
   }
 }
@@ -317,7 +521,7 @@ void ArenaCameraNode::initialize_()
   // Create publishers based on configuration
   if (publish_raw_) {
     m_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
-        this->get_parameter("topic").as_string(), pub_qos_);
+        topic_, pub_qos_);
   }
   
   // Only create main compressed publisher for non-polarized formats
@@ -326,41 +530,41 @@ void ArenaCameraNode::initialize_()
   
   if (publish_compressed_ && !is_polarized) {
     m_pub_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
-        this->get_parameter("topic").as_string() + "/compressed", pub_qos_);
+        topic_ + "/compressed", pub_qos_);
   }
   
   // Create publishers for all polarization channels (if either raw or compressed is enabled)
   if (publish_raw_ || publish_compressed_) {
     m_pub_pol_0deg_ = this->create_publisher<sensor_msgs::msg::Image>(
-        this->get_parameter("topic").as_string() + "/pol_0deg", pub_qos_);
+        topic_ + "/pol_0deg", pub_qos_);
     m_pub_pol_45deg_ = this->create_publisher<sensor_msgs::msg::Image>(
-        this->get_parameter("topic").as_string() + "/pol_45deg", pub_qos_);
+        topic_ + "/pol_45deg", pub_qos_);
     m_pub_pol_90deg_ = this->create_publisher<sensor_msgs::msg::Image>(
-        this->get_parameter("topic").as_string() + "/pol_90deg", pub_qos_);
+        topic_ + "/pol_90deg", pub_qos_);
     m_pub_pol_135deg_ = this->create_publisher<sensor_msgs::msg::Image>(
-        this->get_parameter("topic").as_string() + "/pol_135deg", pub_qos_);
+        topic_ + "/pol_135deg", pub_qos_);
   }
   
   // Create compressed publishers for all polarization channels (only if compressed enabled)
   if (publish_compressed_) {
     m_pub_pol_0deg_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
-        this->get_parameter("topic").as_string() + "/pol_0deg/compressed", pub_qos_);
+        topic_ + "/pol_0deg/compressed", pub_qos_);
     m_pub_pol_45deg_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
-        this->get_parameter("topic").as_string() + "/pol_45deg/compressed", pub_qos_);
+        topic_ + "/pol_45deg/compressed", pub_qos_);
     m_pub_pol_90deg_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
-        this->get_parameter("topic").as_string() + "/pol_90deg/compressed", pub_qos_);
+        topic_ + "/pol_90deg/compressed", pub_qos_);
     m_pub_pol_135deg_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
-        this->get_parameter("topic").as_string() + "/pol_135deg/compressed", pub_qos_);
+        topic_ + "/pol_135deg/compressed", pub_qos_);
   }
   
   // Create publishers for max-combined polarization image
   if (publish_raw_) {
     m_pub_pol_max_ = this->create_publisher<sensor_msgs::msg::Image>(
-        this->get_parameter("topic").as_string() + "/pol_max", pub_qos_);
+        topic_ + "/pol_max", pub_qos_);
   }
   if (publish_compressed_) {
     m_pub_pol_max_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
-        this->get_parameter("topic").as_string() + "/pol_max/compressed", pub_qos_);
+        topic_ + "/pol_max/compressed", pub_qos_);
   }
 
   std::stringstream pub_qos_info;
@@ -501,7 +705,7 @@ void ArenaCameraNode::publish_images_()
                          cvType,
                          const_cast<void*>(static_cast<const void*>(image_to_compress->GetData())));
           
-          std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
+          std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
           cv::imencode(".jpg", img_mat, compressed_msg->data, params);
           
           // converted_image is automatically destroyed by RAII when going out of scope
@@ -560,6 +764,11 @@ void ArenaCameraNode::publish_images_()
                 arena_camera::ArenaImagePtr bgr_image(
                     Arena::ImageFactory::Convert(channels[info.index], PFNC_BGR8));
                 
+                // Validate that conversion actually produced BGR8 format
+                if (!validate_bgr8_format(bgr_image.get(), "polarization channel " + info.name)) {
+                  continue;  // Skip this channel if format is unexpected
+                }
+                
                 // Publish raw polarization channel if enabled
                 if (publish_raw_ && *info.raw_pub) {
                   auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -590,7 +799,7 @@ void ArenaCameraNode::publish_images_()
                   // Convert to cv::Mat and compress with JPEG
                   cv::Mat bgr_mat(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3, 
                                  const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
-                  std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
+                  std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
                   cv::imencode(".jpg", bgr_mat, compressed_msg->data, params);
                   
                   (*info.compressed_pub)->publish(std::move(compressed_msg));
@@ -603,9 +812,18 @@ void ArenaCameraNode::publish_images_()
               if ((publish_raw_ && m_pub_pol_max_) || (publish_compressed_ && m_pub_pol_max_compressed_)) {
                 // Convert all channels to BGR8 first - use RAII wrapper for exception safety
                 arena_camera::ArenaImageVector bgr_channels;
+                bool all_valid = true;
                 for (size_t i = 0; i < 4; i++) {
-                  bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], PFNC_BGR8));
+                  Arena::IImage* converted = Arena::ImageFactory::Convert(channels[i], PFNC_BGR8);
+                  bgr_channels.push_back(converted);
+                  if (!validate_bgr8_format(converted, "max-combined channel " + std::to_string(i))) {
+                    all_valid = false;
+                  }
                 }
+                
+                if (!all_valid) {
+                  log_warn("Skipping max-combined image due to unexpected pixel format after conversion");
+                } else {
                 
                 // Get dimensions from first channel
                 size_t height = bgr_channels[0]->GetHeight();
@@ -648,13 +866,14 @@ void ArenaCameraNode::publish_images_()
                   compressed_msg->format = "jpeg";
                   
                   // Compress with JPEG (max_mat already computed above)
-                  std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
+                  std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
                   cv::imencode(".jpg", max_mat, compressed_msg->data, params);
                   
                   m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
                 }
                 
                 // bgr_channels automatically cleaned up by RAII when going out of scope
+                }  // end else (all_valid)
               }
             }
             
@@ -793,9 +1012,15 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
     
     m_images_published_++;
     
-    // Update FPS calculation
+    // Update FPS calculation and watchdog timestamp
     m_fps_frame_count_++;
     auto now = std::chrono::steady_clock::now();
+    m_last_frame_time_ = now;
+    m_watchdog_initialized_ = true;
+    if (m_camera_frozen_) {
+      log_info("Camera recovered - frames are being received again");
+      m_camera_frozen_ = false;
+    }
     if (m_fps_frame_count_ == 1) {
       m_fps_last_time_ = now;
     } else {
@@ -835,8 +1060,14 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
             
             // Process each channel - use RAII for converted BGR images
             for (const auto& info : channel_infos) {
+              // Convert from BayerRG8 to BGR8 for publishing and compression
               arena_camera::ArenaImagePtr bgr_image(
                   Arena::ImageFactory::Convert(channels[info.index], PFNC_BGR8));
+              
+              // Validate that conversion actually produced BGR8 format
+              if (!validate_bgr8_format(bgr_image.get(), "polarization channel " + info.name)) {
+                continue;  // Skip this channel if format is unexpected
+              }
               
               if (publish_raw_ && *info.raw_pub) {
                 auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -878,9 +1109,18 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
             if ((publish_raw_ && m_pub_pol_max_) || (publish_compressed_ && m_pub_pol_max_compressed_)) {
               // Use RAII wrapper for exception safety
               arena_camera::ArenaImageVector bgr_channels;
+              bool all_valid = true;
               for (size_t i = 0; i < 4; i++) {
-                bgr_channels.push_back(Arena::ImageFactory::Convert(channels[i], PFNC_BGR8));
+                Arena::IImage* converted = Arena::ImageFactory::Convert(channels[i], PFNC_BGR8);
+                bgr_channels.push_back(converted);
+                if (!validate_bgr8_format(converted, "max-combined channel " + std::to_string(i))) {
+                  all_valid = false;
+                }
               }
+              
+              if (!all_valid) {
+                log_warn("Skipping max-combined image due to unexpected pixel format after conversion");
+              } else {
               
               size_t height = bgr_channels[0]->GetHeight();
               size_t width = bgr_channels[0]->GetWidth();
@@ -927,6 +1167,7 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
               }
               
               // bgr_channels automatically cleaned up by RAII when going out of scope
+              }  // end else (all_valid)
             }
             
             // channels automatically cleaned up by RAII when going out of scope
@@ -1588,8 +1829,27 @@ void ArenaCameraNode::set_nodes_test_pattern_image_()
 
 void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat)
 {
+  // Watchdog: detect frozen camera (no new frames within timeout)
+  if (m_device_connected_ && m_watchdog_initialized_ && !trigger_mode_activated_) {
+    auto now = std::chrono::steady_clock::now();
+    double elapsed_sec = std::chrono::duration<double>(now - m_last_frame_time_).count();
+    
+    if (elapsed_sec > watchdog_timeout_sec_) {
+      if (!m_camera_frozen_) {
+        m_camera_frozen_ = true;
+        log_err("Watchdog: Camera appears frozen - no new frames for " +
+                std::to_string(elapsed_sec) + "s (timeout: " +
+                std::to_string(watchdog_timeout_sec_) + "s). Last frame " +
+                std::to_string(m_images_published_) + " published.");
+      }
+    }
+  }
+
   if (m_device_connected_) {
-    if (m_image_publish_errors_ > 0 || m_backpressure_events_ > 0) {
+    if (m_camera_frozen_) {
+      stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR,
+                   "Camera frozen - no new frames received");
+    } else if (m_image_publish_errors_ > 0 || m_backpressure_events_ > 0) {
       std::string warn_msg = "Camera connected with";
       if (m_image_publish_errors_ > 0) {
         warn_msg += " errors";
@@ -1626,6 +1886,17 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
     stat.add("Avg Processing Time (ms)", "N/A");
   }
   stat.add("Processing Time Samples", std::to_string(m_processing_time_samples_));
+  
+  // Watchdog metrics
+  stat.add("Camera Frozen", m_camera_frozen_ ? "true" : "false");
+  stat.add("Watchdog Timeout (sec)", std::to_string(watchdog_timeout_sec_));
+  if (m_watchdog_initialized_) {
+    auto now = std::chrono::steady_clock::now();
+    double since_last = std::chrono::duration<double>(now - m_last_frame_time_).count();
+    stat.add("Time Since Last Frame (sec)", std::to_string(since_last));
+  } else {
+    stat.add("Time Since Last Frame (sec)", "N/A (no frames yet)");
+  }
 
   if (m_device_connected_) {
     stat.add("Serial", serial_.empty() ? "first discovered" : serial_);

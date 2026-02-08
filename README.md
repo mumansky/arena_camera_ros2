@@ -229,6 +229,49 @@ Or for even more detail:
 
 Available log levels (from most to least verbose): DEBUG, INFO, WARN, ERROR, FATAL
 
+# Architecture
+
+## Node Lifecycle
+1. **Config Loading**: `camera.yaml` is read on startup as the single source of truth for all parameters.
+2. **System Init**: Arena SDK system is opened and device discovery begins.
+3. **Device Connection**: A 1-second timer polls for camera availability.
+4. **Streaming**: Once a camera is found, the node starts streaming:
+   - **Continuous mode** (default): Uses ArenaSDK's callback-based image acquisition (`RegisterImageCallback`). Each frame is processed in `handle_camera_image_()`.
+   - **Trigger mode**: Waits for `trigger_image` service calls. Uses blocking `GetImage()`.
+5. **Shutdown**: Destructor deregisters callbacks, stops streaming, destroys device and system in correct order.
+
+## Image Processing Pipeline
+- Raw images from the camera are published as `sensor_msgs/Image`
+- For non-polarized cameras, images are optionally converted to BGR8 and compressed to JPEG
+- For polarized cameras (pixel format `0x8220020F` / `PolarizedAngles_0d_45d_90d_135d_BayerRG8`):
+  1. The raw 4-channel image is split into 4 separate channels using `ImageFactory::SplitChannels()`
+  2. Channels are ordered: 0°, 45°, 90°, 135° polarization angles
+  3. Each channel is converted from BayerRG8 to BGR8 using `ImageFactory::Convert()`
+  4. A "max-combined" image is computed using per-pixel maximum across all 4 channels
+  5. Each channel and the max-combined image are published as both raw and compressed
+
+## Watchdog
+The node includes a watchdog that detects when the camera stops sending frames. If no new frame arrives within `watchdog_timeout_sec` seconds (default: 5.0), the diagnostics report an ERROR status. The watchdog is only active in continuous (non-trigger) mode. Recovery is automatically detected when frames resume.
+
+## QoS Configuration
+The node uses `SensorDataQoS` as the base profile, which defaults to:
+- History: keep_last (depth 5)
+- Reliability: best_effort
+- Durability: volatile
+
+These can be overridden in `camera.yaml` with `qos_history`, `qos_history_depth`, and `qos_reliability`. See the config file for trade-off documentation.
+
+## Compression
+JPEG compression quality is configurable via `jpeg_quality` (1-100, default 80). All compressed image topics use this setting.
+
+# Running Tests
+
+Unit tests can be run after building the workspace:
+
+    cd ros2_ws
+    colcon test --packages-select arena_camera_node
+    colcon test-result --verbose
+
 # Road map
 - support windows
 - add -h flag to nodes
