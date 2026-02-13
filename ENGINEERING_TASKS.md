@@ -516,7 +516,289 @@
 
 ---
 
+---
+
+## 🔵 SDK COMPLIANCE (Differences vs ArenaSDK Examples & Documentation)
+
+The following items were identified by comparing the driver implementation against
+the official ArenaSDK C++ examples (`Cpp_Acquisition`, `Cpp_Trigger`,
+`Cpp_Callback_ImageCallbacks`, `Cpp_Exposure`, `Cpp_Acquisition_RapidAcquisition`,
+`Cpp_Callback_OnDeviceDisconnected`, `Cpp_Enumeration`, `Cpp_Acquisition_MultiDevice`)
+and the SDK performance documentation.
+
+### Task 21: Missing `AcquisitionMode` Setting
+**Priority:** Medium | **Effort:** Low | **Risk:** Medium
+
+**Problem:** Every SDK acquisition example explicitly sets `AcquisitionMode` to `"Continuous"` before `StartStream()`. The driver never sets it — it relies on the UserSetDefault profile, which is not guaranteed to be `"Continuous"` (e.g., if someone previously saved the camera with `SingleFrame` mode).
+
+**What to Fix:**
+- Add `Arena::SetNodeValue<GenICam::gcstring>(nodemap, "AcquisitionMode", "Continuous");` in `set_nodes_()` (or a dedicated helper)
+- For trigger mode, consider using `"SingleFrame"` instead
+
+**Relevant Files:**
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (`set_nodes_()`)
+
+---
+
+### Task 22: No Device Disconnect Callback
+**Priority:** Medium | **Effort:** Medium | **Risk:** Medium
+
+**Problem:** `Cpp_Callback_OnDeviceDisconnected` shows registering `Arena::IDisconnectCallback` via `pSystem->RegisterDeviceDisconnectCallback()` to detect GigE disconnects at runtime. The driver has no disconnect detection — if the camera is unplugged mid-stream, the node silently stalls until the watchdog flags "frozen."
+
+**What to Fix:**
+- Implement `Arena::IDisconnectCallback` subclass
+- Register it via `m_pSystem->RegisterDeviceDisconnectCallback(m_pDevice.get(), &cb)`
+- In the callback: log disconnect, set `m_device_connected_ = false`, update diagnostics to ERROR
+- Deregister in destructor before `DestroyDevice()`
+- Optionally trigger reconnection logic
+
+**Relevant Files:**
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.h` (new callback class)
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (`run_()`, destructor)
+
+---
+
+### Task 23: `GetImage` Timeout Too Short in Trigger Mode
+**Priority:** Medium | **Effort:** Low | **Risk:** Medium
+
+**Problem:** SDK trigger example uses `GetImage(2000)` (2s). The driver uses `GetImage(1000)` (1s) in `publish_an_image_on_trigger_()`. With long exposure times (e.g., 900ms), this leaves almost no margin for trigger arming + transfer latency, causing intermittent `TimeoutException`.
+
+**What to Fix:**
+- Increase to at least `2000`, or compute dynamically: `max(2000, (int)(exposure_time_ / 1000.0) + 2000)`
+
+**Relevant Files:**
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (`publish_an_image_on_trigger_()`)
+
+---
+
+### Task 24: Unbounded Trigger-Armed Busy-Wait Loop
+**Priority:** High | **Effort:** Low | **Risk:** High
+
+**Problem:** The trigger polling loop has a `waitForTriggerCount` variable that is never decremented or checked — it's an infinite busy-wait that pins a CPU core at 100% if the trigger never arms.
+
+```cpp
+auto waitForTriggerCount = 10;
+do {
+    triggerArmed = Arena::GetNodeValue<bool>(..., "TriggerArmed");
+    if (triggerArmed == false && (waitForTriggerCount % 10) == 0) { ... }
+} while (triggerArmed == false);
+```
+
+**What to Fix:**
+- Add `std::this_thread::sleep_for(std::chrono::milliseconds(10))` per iteration
+- Add maximum retry count or timeout with an exception/error response
+- Decrement the counter so the modulo check actually does something
+
+**Relevant Files:**
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (`publish_an_image_on_trigger_()`)
+
+---
+
+### Task 25: Exception Catch Order Bug — Dead Code
+**Priority:** Medium | **Effort:** Low | **Risk:** Medium
+
+**Problem:** In `publish_an_image_on_trigger_()`, `std::exception` is caught **before** `GenICam::GenericException`. Since `GenICam::GenericException` inherits from `std::exception`, the GenICam catch block is unreachable dead code. All SDK examples catch `GenICam::GenericException` **first**.
+
+**What to Fix:**
+- Swap the catch order so `GenICam::GenericException&` comes before `std::exception&`
+
+**Relevant Files:**
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (`publish_an_image_on_trigger_()`)
+
+---
+
+### Task 26: No Configurable Stream Buffer Count
+**Priority:** Low | **Effort:** Low | **Risk:** Low
+
+**Problem:** `StartStream()` is called with no argument (defaults to 10 buffers). `Cpp_Acquisition_RapidAcquisition` uses up to 500 buffers for high-throughput scenarios. For callback-based streaming, having enough buffers prevents starvation.
+
+**What to Fix:**
+- Add `stream_buffer_count` parameter to `camera.yaml` (default 10)
+- Pass it to `m_pDevice->StartStream(stream_buffer_count_)`
+
+**Relevant Files:**
+- `etc/arena_camera/camera.yaml`
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (`run_()`)
+
+---
+
+### Task 27: No Settings Restoration on Shutdown
+**Priority:** Low | **Effort:** Medium | **Risk:** Low
+
+**Problem:** Every SDK example saves initial node values before modification and restores them during cleanup, leaving the camera in its original state. The driver loads UserSetDefault on startup but never restores settings on shutdown. If the node crashes after setting trigger mode to `"On"`, the camera stays in trigger mode.
+
+**What to Fix:**
+- Save initial values of critical settings before modification (TriggerMode, ExposureAuto, GainAuto, PixelFormat, AcquisitionMode)
+- Restore them in the destructor after `StopStream()`
+- Alternatively, re-load UserSetDefault in the destructor
+
+**Relevant Files:**
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.h` (store initial values)
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (destructor, `set_nodes_*()` functions)
+
+---
+
+### Task 28: No `IsIncomplete()` Check on Received Images
+**Priority:** High | **Effort:** Low | **Risk:** High
+
+**Problem:** ArenaSDK images can be incomplete (missing GigE packets). The `Cpp_Acquisition` and other examples check `pImage->IsIncomplete()` and skip/log incomplete frames. The driver never checks — incomplete images with corrupted data are silently published.
+
+**What to Fix:**
+- Add `pImage->IsIncomplete()` check in `process_copied_image_()`, `publish_images_()`, and `publish_an_image_on_trigger_()`
+- Log a warning and count incomplete frames
+- Add incomplete frame count to diagnostics
+
+**Relevant Files:**
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (`process_copied_image_()`, `publish_images_()`, `publish_an_image_on_trigger_()`)
+
+---
+
+### Task 29: ROI Width/Height Not Clamped or Increment-Aligned
+**Priority:** Medium | **Effort:** Low | **Risk:** Medium
+
+**Problem:** `Cpp_Acquisition_RapidAcquisition` carefully enforces integer node increment alignment:
+```cpp
+value = (((value - pInt->GetMin()) / pInt->GetInc()) * pInt->GetInc()) + pInt->GetMin();
+```
+The driver sets Width/Height directly without checking min/max/increment. Many cameras require Width/Height to be multiples of 4, 8, or 16 — setting a non-aligned value throws `GenICam::OutOfRangeException`.
+
+**What to Fix:**
+- Fetch the `CIntegerPtr` for Width/Height
+- Clamp to min/max and align to increment before setting
+- Log the adjusted value if it differs from the requested value
+
+**Relevant Files:**
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (`set_nodes_roi_()`)
+
+---
+
+### Task 30: `frame_id` Is Frame Counter, Not TF Frame Name
+**Priority:** Medium | **Effort:** Low | **Risk:** Medium
+
+**Problem:** ROS convention: `sensor_msgs/Image.header.frame_id` should be a TF frame name (e.g., `"camera_optical_frame"`) for correct 3D integration with URDF/TF. The driver sets `frame_id = std::to_string(pImage->GetFrameId())` — the integer frame counter, not a TF frame.
+
+**What to Fix:**
+- Add `frame_id` string parameter to `camera.yaml` (default `"arena_camera_frame"`)
+- Use it for all published message headers
+- Optionally publish the image counter as a separate diagnostic field
+
+**Relevant Files:**
+- `etc/arena_camera/camera.yaml`
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (`msg_form_image_()`, `process_copied_image_()`)
+
+---
+
+### Task 31: Timestamps Use Camera Clock, Not ROS Clock
+**Priority:** High | **Effort:** Low | **Risk:** High
+
+**Problem:** `pImage->GetTimestampNs()` returns the camera's internal PTP/hardware timestamp, which is **not synchronized** with the host system clock (unless PTP is explicitly configured). Timestamps won't align with other ROS nodes' wall-clock times, breaking time-based sensor fusion (LiDAR, IMU, etc.).
+
+**What to Fix:**
+- Default to `this->now()` (ROS clock) for message timestamps
+- Add `use_camera_timestamp` boolean parameter (default `false`)
+- When `true`, use `GetTimestampNs()` (for PTP-synchronized setups)
+- Document the trade-off in `camera.yaml`
+
+**Relevant Files:**
+- `etc/arena_camera/camera.yaml`
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (`msg_form_image_()`, `process_copied_image_()`, all timestamp assignments)
+
+---
+
+### Task 32: Parameters Bypass ROS2 Parameter System
+**Priority:** High | **Effort:** High | **Risk:** Medium
+
+**Problem:** All parameters are read via a custom YAML parser (`config_string(m_config_params_, ...)`) instead of ROS2's `declare_parameter()` / `get_parameter()`. Consequences:
+- Parameters don't appear in `ros2 param list`
+- Launch file overrides (`--ros-args -p key:=value`) don't work
+- Dynamic reconfigure is impossible
+- Parameter descriptors/types not declared
+
+**What to Fix:**
+- Replace custom YAML parsing with `declare_parameter<T>("name", default_value)` / `get_parameter()`
+- Pass the config file via `--params-file camera.yaml` in the launch file (ROS2 handles YAML loading)
+- Add parameter descriptors for all parameters
+- Remove the custom `load_config_file_()` and `config_*()` helpers
+
+**Relevant Files:**
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (`load_config_file_()`, `parse_parameters_()`)
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.h` (remove `m_config_params_`)
+
+---
+
+### Task 33: Bare `throw;` Outside Catch Block (Undefined Behavior)
+**Priority:** Medium | **Effort:** Low | **Risk:** Medium
+
+**Problem:** QoS error handling uses bare `throw;` which is only valid inside a catch block. Called outside a catch block, this is undefined behavior (typically calls `std::terminate()`).
+
+```cpp
+log_err(pub_qos_history_ + " is not supported for this node");
+throw;  // UB — not inside a catch block
+```
+
+**What to Fix:**
+- Replace `throw;` with `throw std::invalid_argument("Unsupported QoS history: " + pub_qos_history_);`
+- Apply same fix for the QoS reliability `throw;`
+
+**Relevant Files:**
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (`initialize_()`, QoS setup section)
+
+---
+
+### Task 34: Data Race on FPS/Watchdog Counters
+**Priority:** Medium | **Effort:** Low | **Risk:** Medium
+
+**Problem:** `handle_camera_image_()` (SDK grab thread) and `process_copied_image_()` (worker thread) both update `m_fps_frame_count_`, `m_last_frame_time_`, `m_images_published_` concurrently. These are plain `uint64_t` / `chrono::time_point` — not `std::atomic` — so concurrent writes are a data race (undefined behavior per C++ standard).
+
+**What to Fix:**
+- Remove duplicate counter updates from `handle_camera_image_()` (the worker thread in `process_copied_image_()` is the natural owner since it does the actual publish)
+- Or make the shared counters `std::atomic<uint64_t>` and use `std::atomic` for the time_point
+
+**Relevant Files:**
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (`handle_camera_image_()`, `process_copied_image_()`)
+
+---
+
+### Task 35: Missing `DeviceLinkThroughputReserve` Configuration
+**Priority:** Low | **Effort:** Low | **Risk:** Low
+
+**Problem:** SDK performance docs recommend setting `DeviceLinkThroughputReserve > 0` when `StreamPacketResendEnable` is true, to reserve bandwidth for retransmissions. The driver enables packet resend but never sets throughput reserve.
+
+**What to Fix:**
+- Add `Arena::SetNodeValue<double>(nodemap, "DeviceLinkThroughputReserve", 10.0)` alongside packet resend enable
+- Make it a configurable parameter (default 10%)
+
+**Relevant Files:**
+- `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` (`set_nodes_()`, stream configuration section)
+
+---
+
+### SDK Compliance Summary
+
+| Task | Issue | Severity | Effort |
+|------|-------|----------|--------|
+| 21 | Missing `AcquisitionMode` | Medium | Low |
+| 22 | No disconnect callback | Medium | Medium |
+| 23 | Short `GetImage` timeout in trigger | Medium | Low |
+| 24 | Unbounded trigger-armed busy-wait | High | Low |
+| 25 | Wrong exception catch order (dead code) | Medium | Low |
+| 26 | No configurable stream buffer count | Low | Low |
+| 27 | No settings restoration on shutdown | Low | Medium |
+| 28 | No `IsIncomplete()` check | High | Low |
+| 29 | ROI not increment-aligned | Medium | Low |
+| 30 | `frame_id` is counter, not TF frame | Medium | Low |
+| 31 | Timestamps from camera clock, not ROS | High | Low |
+| 32 | Parameters bypass ROS2 parameter system | High | High |
+| 33 | Bare `throw;` (undefined behavior) | Medium | Low |
+| 34 | Data race on FPS/watchdog counters | Medium | Low |
+| 35 | Missing `DeviceLinkThroughputReserve` | Low | Low |
+
+**Quick wins (highest impact, lowest effort):** Tasks 24, 25, 28, 31, 33, 34
+
+---
+
 ## Notes
 - Tasks marked 🔴 should be completed before production release
 - Tasks marked 🟡 important for robustness in field conditions
 - Tasks marked 🟠 nice-to-have for polish and usability
+- Tasks marked 🔵 identified by comparing against ArenaSDK official examples and documentation
