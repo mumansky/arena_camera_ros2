@@ -11,15 +11,20 @@
 //
 
 // std
-#include <atomic>      // std::atomic for thread-safe flags (streaming state, backpressure)
-#include <chrono>      // chrono_literals
-#include <cstddef>     // size_t
-#include <cstdint>     // int64_t
-#include <cstdio>      // setvbuf, stdout, BUFSIZ
-#include <exception>   // std::exception
-#include <functional>  // std::bind, std::placeholders
-#include <memory>      // std::shared_ptr, std::unique_ptr
-#include <string>      // std::string
+#include <atomic>              // std::atomic for thread-safe flags (streaming state, backpressure)
+#include <chrono>              // chrono_literals
+#include <condition_variable>  // std::condition_variable for worker thread signalling
+#include <cstddef>             // size_t
+#include <cstdint>             // int64_t
+#include <cstdio>              // setvbuf, stdout, BUFSIZ
+#include <exception>           // std::exception
+#include <functional>          // std::bind, std::placeholders
+#include <map>                 // std::map for diagnostics cache
+#include <memory>              // std::shared_ptr, std::unique_ptr
+#include <mutex>               // std::mutex for worker thread
+#include <string>              // std::string
+#include <thread>              // std::thread for async image processing
+#include <vector>              // std::vector for image data buffer
 
 // ros
 #include <rclcpp/rclcpp.hpp>
@@ -69,6 +74,22 @@ class ArenaCameraNode : public rclcpp::Node
     // This prevents race conditions where a callback tries to use m_pDevice during cleanup
     m_is_streaming_.store(false);
     
+    // Stop the worker thread before deregistering callback or stopping stream
+    {
+      std::lock_guard<std::mutex> lock(m_worker_mutex_);
+      m_worker_stop_ = true;
+    }
+    m_worker_cv_.notify_one();
+    if (m_worker_thread_.joinable()) {
+      m_worker_thread_.join();
+      log_info("Image processing worker thread stopped");
+    }
+    // Destroy any unconsumed pending image copy
+    if (m_pending_image_) {
+      Arena::ImageFactory::Destroy(m_pending_image_);
+      m_pending_image_ = nullptr;
+    }
+    
     // Deregister image callback before stopping stream
     if (m_image_callback_handler_ && m_pDevice) {
       try {
@@ -77,6 +98,8 @@ class ArenaCameraNode : public rclcpp::Node
         log_info("Image callback deregistered");
       } catch (const std::exception& e) {
         log_warn(std::string("Warning during callback deregistration: ") + e.what());
+      } catch (...) {
+        log_warn("Unknown exception during callback deregistration");
       }
     }
     
@@ -112,12 +135,14 @@ class ArenaCameraNode : public rclcpp::Node
       } catch (...) {
         log_warn("Unknown exception during device cleanup");
       }
-      m_pDevice.reset();  // Release shared_ptr (deleter is no-op)
+      // Don't reset device ptr until after system is closed
     }
     
     // Close system
     if (m_pSystem) {
       try {
+        // Small delay to let Arena SDK finish internal cleanup after DestroyDevice
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         Arena::ISystem* pSystem = m_pSystem.get();
         Arena::CloseSystem(pSystem);
         log_info("System is destroyed");
@@ -178,6 +203,18 @@ class ArenaCameraNode : public rclcpp::Node
   
   // Image callback handler for event-driven acquisition
   std::unique_ptr<ImageCallbackHandler> m_image_callback_handler_;
+
+  // Worker thread for async image processing (keeps OnImage callback fast)
+  // ArenaSDK requires OnImage to return quickly or the grab thread stalls,
+  // so OnImage does a fast ImageFactory::Copy and hands off to this thread.
+  std::thread m_worker_thread_;
+  std::mutex m_worker_mutex_;
+  std::condition_variable m_worker_cv_;
+  bool m_worker_has_image_{false};
+  bool m_worker_stop_{false};
+  Arena::IImage* m_pending_image_{nullptr};  // Deep copy handed off by OnImage
+  void worker_thread_func_();
+  void process_copied_image_(Arena::IImage* pImage);
 
   // Diagnostics
   std::unique_ptr<diagnostic_updater::Updater> m_diagnostic_updater_;
@@ -277,6 +314,12 @@ class ArenaCameraNode : public rclcpp::Node
   std::chrono::steady_clock::time_point m_last_frame_time_;  // Timestamp of last successfully received frame
   bool m_watchdog_initialized_{false};  // Whether we've received at least one frame
   bool m_camera_frozen_{false};  // Whether the camera is currently detected as frozen
+
+  // Diagnostics GenICam read cache — rate-limited to avoid stalling GigE stream
+  static constexpr double DIAG_GENICAM_READ_INTERVAL_SEC = 10.0;
+  std::chrono::steady_clock::time_point m_last_diag_genicam_read_time_{};
+  bool m_diag_genicam_cache_valid_{false};
+  std::map<std::string, std::string> m_diag_genicam_cache_;
 
   YAML::Node m_config_params_;
 
