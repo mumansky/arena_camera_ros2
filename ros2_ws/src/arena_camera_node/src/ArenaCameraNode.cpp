@@ -1448,12 +1448,36 @@ void ArenaCameraNode::set_nodes_()
   log_debug("set_nodes_trigger_mode_() completed");
   // configure Auto Negotiate Packet Size and Packet Resend
   try {
-    Arena::SetNodeValue<bool>(m_pDevice->GetTLStreamNodeMap(), "StreamAutoNegotiatePacketSize", true);
-    Arena::SetNodeValue<bool>(m_pDevice->GetTLStreamNodeMap(), "StreamPacketResendEnable", true);
+    auto pTLStreamNodeMap = m_pDevice->GetTLStreamNodeMap();
+
+    // "NewestOnly" drops old frames when the consumer can't keep up, preventing
+    // buffer exhaustion that deadlocks the grab thread.  Every Arena SDK example
+    // sets this — the default "OldestFirst" will eventually stall the stream.
+    Arena::SetNodeValue<GenICam::gcstring>(pTLStreamNodeMap, "StreamBufferHandlingMode", "NewestOnly");
+    log_debug("StreamBufferHandlingMode set to NewestOnly");
+
+    Arena::SetNodeValue<bool>(pTLStreamNodeMap, "StreamAutoNegotiatePacketSize", true);
+    Arena::SetNodeValue<bool>(pTLStreamNodeMap, "StreamPacketResendEnable", true);
   } catch (GenICam::GenericException& e) {
     log_warn(std::string("\tStream configuration warning: ") + e.what());
   } catch (std::exception& e) {
     log_warn(std::string("\tStream configuration warning: ") + e.what());
+  }
+
+  // Maximize GigE packet size for best throughput (follows RapidAcquisition example)
+  try {
+    auto nodemap = m_pDevice->GetNodeMap();
+    GenApi::CIntegerPtr pPacketSize = nodemap->GetNode("DeviceStreamChannelPacketSize");
+    if (pPacketSize && GenApi::IsReadable(pPacketSize) && GenApi::IsWritable(pPacketSize)) {
+      int64_t maxPacketSize = pPacketSize->GetMax();
+      pPacketSize->SetValue(maxPacketSize);
+      log_info(std::string("\tDeviceStreamChannelPacketSize set to ") +
+               std::to_string(maxPacketSize) + " bytes");
+    }
+  } catch (GenICam::GenericException& e) {
+    log_warn(std::string("\tPacket size configuration warning: ") + e.what());
+  } catch (std::exception& e) {
+    log_warn(std::string("\tPacket size configuration warning: ") + e.what());
   }
   log_debug("Stream configuration completed");
 
