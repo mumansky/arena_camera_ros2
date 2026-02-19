@@ -622,7 +622,48 @@ void ArenaCameraNode::run_()
   m_pDevice.reset(device);
   set_nodes_();
   log_debug("set_nodes_() completed, starting stream...");
-  
+
+  // --- GigE health check: warn about MTU < 9000 ---
+  // USB Ethernet adapters typically cap at MTU 1500 which forces ~3400 packets
+  // per 5 MP frame.  This is fine at low frame rates but causes packet loss and
+  // stream stalls at high rates.  A native PCIe NIC with jumbo frames (9000) is
+  // strongly recommended for production use.
+  try {
+    // Walk /sys/class/net/*/address looking for the interface whose route
+    // covers the camera subnet.  Lightweight — no privileges needed.
+    std::string cam_iface;
+    int cam_mtu = 0;
+    FILE* fp = popen("ip -o route get 172.24.0.30 2>/dev/null | awk '{print $3}'", "r");
+    if (fp) {
+      char buf[128]{};
+      if (fgets(buf, sizeof(buf), fp)) {
+        cam_iface = buf;
+        // trim newline
+        while (!cam_iface.empty() && (cam_iface.back() == '\n' || cam_iface.back() == '\r'))
+          cam_iface.pop_back();
+      }
+      pclose(fp);
+    }
+    if (!cam_iface.empty()) {
+      std::string mtu_path = "/sys/class/net/" + cam_iface + "/mtu";
+      std::ifstream mtu_file(mtu_path);
+      if (mtu_file.is_open()) {
+        mtu_file >> cam_mtu;
+      }
+    }
+    if (cam_mtu > 0 && cam_mtu < 9000) {
+      log_warn("GigE health: interface '" + cam_iface + "' MTU is " +
+               std::to_string(cam_mtu) + " (recommended: 9000 for jumbo frames). "
+               "Streaming at high frame rates may cause packet loss and freezes. "
+               "Consider using a native PCIe GigE NIC or limiting frame rate.");
+    } else if (cam_mtu >= 9000) {
+      log_info("GigE health: interface '" + cam_iface + "' MTU " +
+               std::to_string(cam_mtu) + " — jumbo frames OK");
+    }
+  } catch (...) {
+    // Non-critical — don't let a health check prevent streaming
+  }
+
   // StartStream can fail with transient GigE timeouts (e.g., after unclean
   // shutdown or link hiccup).  Retry a few times before giving up.
   constexpr int MAX_STREAM_START_ATTEMPTS = 3;
@@ -1025,25 +1066,10 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
 
     m_images_published_++;
 
-    // --- FPS / watchdog bookkeeping ---
-    m_fps_frame_count_++;
-    auto now = std::chrono::steady_clock::now();
-    m_last_frame_time_ = now;
-    m_watchdog_initialized_ = true;
-    if (m_camera_frozen_) {
-      log_info("Camera recovered - frames are being received again");
-      m_camera_frozen_ = false;
-    }
-    if (m_fps_frame_count_ == 1) {
-      m_fps_last_time_ = now;
-    } else {
-      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_fps_last_time_).count();
-      if (elapsed >= 1000) {
-        m_calculated_fps_ = (m_fps_frame_count_ * 1000.0) / elapsed;
-        m_fps_frame_count_ = 0;
-        m_fps_last_time_ = now;
-      }
-    }
+    // Note: FPS / watchdog bookkeeping is handled in handle_camera_image_() (the
+    // callback on the grab thread) so that timestamps are accurate even when the
+    // worker is slow.  Do NOT update m_fps_frame_count_ or m_last_frame_time_ here
+    // to avoid data races between the callback thread and this worker thread.
 
     log_debug(std::string("image ") + std::to_string(pImage->GetFrameId()) +
              " published to " + topic_);

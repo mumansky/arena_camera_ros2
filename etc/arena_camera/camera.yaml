@@ -92,7 +92,10 @@
     # Enable manual control of the acquisition frame rate
     # When false (default), the camera runs at maximum frame rate
     # When true, allows setting a specific frame rate using acquisition_frame_rate parameter
-    acquisition_frame_rate_enable: false
+    # IMPORTANT: Must be true when using a USB Ethernet adapter (MTU 1500).
+    # At max frame rate, 5MB/frame × 15+ FPS overwhelms the adapter, causing
+    # GigE packet loss, TimeoutExceptions, and stream stalls.
+    acquisition_frame_rate_enable: true
     
     # Target acquisition frame rate in frames per second (FPS)
     # Only takes effect when acquisition_frame_rate_enable is true
@@ -100,6 +103,8 @@
     # Note: Frame rate and exposure time are interdependent:
     #   - Lower frame rate allows longer maximum exposure time
     #   - max_exposure_time ≈ 1 / frame_rate
+    # 5 FPS is safe for USB Ethernet (5MB × 5 = 25MB/s ≈ 200Mbps < USB3 limit).
+    # Increase to 8-10 if using a native PCIe GigE NIC with jumbo frames.
     acquisition_frame_rate: 10
     
     # Trigger Mode
