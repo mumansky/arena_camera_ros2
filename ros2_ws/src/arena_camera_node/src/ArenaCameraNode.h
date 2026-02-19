@@ -316,10 +316,10 @@ class ArenaCameraNode : public rclcpp::Node
   bool m_camera_frozen_{false};  // Whether the camera is currently detected as frozen
 
   // Diagnostics GenICam read cache — rate-limited to avoid stalling GigE stream
-  static constexpr double DIAG_GENICAM_READ_INTERVAL_SEC = 10.0;
+  static constexpr double DIAG_GENICAM_READ_INTERVAL_SEC = 1.0;
   std::chrono::steady_clock::time_point m_last_diag_genicam_read_time_{};
   bool m_diag_genicam_cache_valid_{false};
-  std::map<std::string, std::string> m_diag_genicam_cache_;
+  std::vector<std::pair<std::string, std::string>> m_diag_genicam_cache_;
 
   YAML::Node m_config_params_;
 

@@ -1642,7 +1642,77 @@ void ArenaCameraNode::set_nodes_exposure_()
 {
   auto nodemap = m_pDevice->GetNodeMap();
 
-  // Set advanced exposure parameters first (before enabling auto exposure)
+  // --- Step 1: Ensure ExposureMode is "Timed" ---
+  // Other modes (e.g. TriggerWidth) make ExposureAuto read-only because
+  // exposure duration is controlled externally by the trigger signal width.
+  try {
+    GenApi::CEnumerationPtr pExposureMode = nodemap->GetNode("ExposureMode");
+    if (pExposureMode && GenApi::IsWritable(pExposureMode)) {
+      GenICam::gcstring currentMode = pExposureMode->GetCurrentEntry()->GetSymbolic();
+      if (currentMode != "Timed") {
+        log_info(std::string("\tExposureMode is '") + currentMode.c_str() +
+                 "', switching to 'Timed' to allow auto exposure control");
+        Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureMode", "Timed");
+      }
+    } else if (pExposureMode) {
+      GenICam::gcstring currentMode = pExposureMode->GetCurrentEntry()->GetSymbolic();
+      log_debug(std::string("\tExposureMode is '") + currentMode.c_str() + "' (read-only)");
+    }
+  } catch (GenICam::GenericException& e) {
+    log_debug(std::string("\tExposureMode check: ") + e.what());
+  }
+
+  // --- Step 2: Enable ExposureAuto BEFORE fine-tuning params ---
+  // Many auto-exposure sub-nodes (limits, algorithm, damping) are only
+  // writable/meaningful when ExposureAuto is "Continuous".  Setting them
+  // while ExposureAuto is "Off" can cause the camera to auto-calculate
+  // collapsed limits (e.g. upper == lower == sensor minimum).
+  bool auto_exposure_set = false;
+  if (is_passed_auto_exposure_) {
+    try {
+      GenApi::CEnumerationPtr pExposureAuto = nodemap->GetNode("ExposureAuto");
+      if (pExposureAuto && GenApi::IsWritable(pExposureAuto)) {
+        if (pExposureAuto->GetEntryByName(auto_exposure_.c_str())) {
+          Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureAuto", auto_exposure_.c_str());
+          log_info(std::string("\tExposureAuto set to ") + auto_exposure_);
+          auto_exposure_set = true;
+        } else {
+          log_warn(std::string("\tExposureAuto value '") + auto_exposure_ + "' not supported by this camera. Available values:");
+          GenApi::StringList_t entries;
+          pExposureAuto->GetSymbolics(entries);
+          for (const auto& entry : entries) {
+            log_warn(std::string("\t  - ") + entry.c_str());
+          }
+          log_warn("\tSkipping ExposureAuto setting.");
+          return;
+        }
+      } else {
+        // Detailed diagnostic: why is the node not writable?
+        std::string reason = "ExposureAuto node not writable.";
+        try {
+          GenICam::gcstring currentVal = pExposureAuto
+              ? pExposureAuto->GetCurrentEntry()->GetSymbolic()
+              : "null";
+          reason += " Current value: " + std::string(currentVal.c_str()) + ".";
+        } catch (...) {}
+        try {
+          GenICam::gcstring mode = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "ExposureMode");
+          reason += " ExposureMode: " + std::string(mode.c_str()) + ".";
+        } catch (...) {}
+        try {
+          GenICam::gcstring trig = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode");
+          reason += " TriggerMode: " + std::string(trig.c_str()) + ".";
+        } catch (...) {}
+        log_warn(std::string("\t") + reason);
+        return;
+      }
+    } catch (GenICam::GenericException& e) {
+      log_warn(std::string("\tFailed to set ExposureAuto: ") + e.what());
+      return;
+    }
+  }
+
+  // --- Step 3: Fine-tune auto exposure parameters (now that ExposureAuto is set) ---
   if (is_passed_exposure_auto_algorithm_) {
     try {
       GenApi::CEnumerationPtr pAlgorithm = nodemap->GetNode("ExposureAutoAlgorithm");
@@ -1658,6 +1728,8 @@ void ArenaCameraNode::set_nodes_exposure_()
             log_warn(std::string("\t  - ") + entry.c_str());
           }
         }
+      } else {
+        log_warn("\tExposureAutoAlgorithm node not writable (requires ExposureAuto = Continuous)");
       }
     } catch (GenICam::GenericException& e) {
       log_warn(std::string("\tFailed to set ExposureAutoAlgorithm: ") + e.what());
@@ -1682,7 +1754,7 @@ void ArenaCameraNode::set_nodes_exposure_()
     }
   }
 
-  // Set exposure limit control
+  // Set exposure limit control (set mode before explicit limits)
   if (is_passed_exposure_auto_limit_auto_) {
     try {
       GenApi::CEnumerationPtr pLimitAuto = nodemap->GetNode("ExposureAutoLimitAuto");
@@ -1698,6 +1770,8 @@ void ArenaCameraNode::set_nodes_exposure_()
             log_warn(std::string("\t  - ") + entry.c_str());
           }
         }
+      } else {
+        log_warn("\tExposureAutoLimitAuto node not writable");
       }
     } catch (GenICam::GenericException& e) {
       log_warn(std::string("\tFailed to set ExposureAutoLimitAuto: ") + e.what());
@@ -1723,42 +1797,16 @@ void ArenaCameraNode::set_nodes_exposure_()
     }
   }
 
-  if (is_passed_auto_exposure_) {
-    try {
-      // Verify the node is writable and the value is valid
-      GenApi::CEnumerationPtr pExposureAuto = nodemap->GetNode("ExposureAuto");
-      if (pExposureAuto && GenApi::IsWritable(pExposureAuto)) {
-        // Check if the requested value is available
-        if (pExposureAuto->GetEntryByName(auto_exposure_.c_str())) {
-          Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureAuto", auto_exposure_.c_str());
-          log_info(std::string("\tExposureAuto set to ") + auto_exposure_);
-        } else {
-          log_warn(std::string("\tExposureAuto value '") + auto_exposure_ + "' not supported by this camera. Available values:");
-          GenApi::StringList_t entries;
-          pExposureAuto->GetSymbolics(entries);
-          for (const auto& entry : entries) {
-            log_warn(std::string("\t  - ") + entry.c_str());
-          }
-          log_warn("\tSkipping ExposureAuto setting.");
-          return;
-        }
-      } else {
-        log_warn("\tExposureAuto node not writable");
-        return;
-      }
-
-      if (auto_exposure_ != "Off") {
-        return;  // auto exposure enabled; skip manual exposure
-      }
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ExposureAuto: ") + e.what());
-      return;
-    }
+  // --- Step 4: If auto exposure is on, we're done (skip manual exposure) ---
+  if (auto_exposure_set && auto_exposure_ != "Off") {
+    return;
   }
 
+  // --- Step 5: Manual exposure time ---
   if (is_passed_exposure_time_) {
     if (!is_passed_auto_exposure_) {
       try {
+        // Ensure ExposureMode is Timed before disabling auto
         Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureAuto", "Off");
         log_info("\tExposureAuto set to Off");
       } catch (GenICam::GenericException& e) {
@@ -1991,12 +2039,98 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
     stat.add("Width", std::to_string(width_));
     stat.add("Height", std::to_string(height_));
     stat.add("Pixel Format", pixelformat_ros_);
-    
-    // Live GenICam register reads are DISABLED during streaming.
-    // Reading registers over GigE competes with image transport and causes
-    // TimeoutExceptions that stall the video stream and trigger the watchdog.
-    // TODO: Re-enable with a safe mechanism (e.g., only when stream is paused,
-    //       or via a dedicated control channel if the camera supports it).
-    stat.add("Camera Parameters", "disabled (live reads stall GigE stream)");
+
+    // Rate-limited GenICam register reads — only every DIAG_GENICAM_READ_INTERVAL_SEC
+    // to avoid competing with GigE Vision streaming for register access.
+    auto now_diag = std::chrono::steady_clock::now();
+    double diag_elapsed = m_diag_genicam_cache_valid_
+        ? std::chrono::duration<double>(now_diag - m_last_diag_genicam_read_time_).count()
+        : DIAG_GENICAM_READ_INTERVAL_SEC + 1.0;  // force first read
+
+    if (diag_elapsed >= DIAG_GENICAM_READ_INTERVAL_SEC) {
+      m_diag_genicam_cache_.clear();
+      try {
+        auto nodemap = m_pDevice->GetNodeMap();
+
+        // Helper: attempt a read, cache on success, silently skip on failure
+        auto try_read = [&](const char* diag_key, auto reader) {
+          try { m_diag_genicam_cache_.emplace_back(diag_key, reader(nodemap)); } catch (...) {}
+        };
+
+        // Frame rate
+        try_read("AcquisitionFrameRateEnable", [](auto nm) {
+          return Arena::GetNodeValue<bool>(nm, "AcquisitionFrameRateEnable") ? "true" : "false";
+        });
+        try_read("AcquisitionFrameRate (FPS)", [](auto nm) {
+          bool en = Arena::GetNodeValue<bool>(nm, "AcquisitionFrameRateEnable");
+          if (en) return std::to_string(Arena::GetNodeValue<double>(nm, "AcquisitionFrameRate"));
+          return std::string("disabled (max)");
+        });
+
+        // Gain
+        try_read("Gain (dB)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "Gain")); });
+        try_read("GainRaw", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "GainRaw")); });
+        try_read("GainAuto", [](auto nm) {
+          GenICam::gcstring v = Arena::GetNodeValue<GenICam::gcstring>(nm, "GainAuto"); return std::string(v.c_str());
+        });
+
+        // Exposure
+        try_read("ExposureTime (us)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "ExposureTime")); });
+        try_read("ExposureTimeRaw", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "ExposureTimeRaw")); });
+        try_read("ExposureAuto", [](auto nm) {
+          GenICam::gcstring v = Arena::GetNodeValue<GenICam::gcstring>(nm, "ExposureAuto"); return std::string(v.c_str());
+        });
+        // Image statistics (next to exposure for easy comparison)
+        try_read("TargetBrightness", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "TargetBrightness")); });
+        try_read("CalculatedMean", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "CalculatedMean")); });
+        try_read("CalculatedMedian", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "CalculatedMedian")); });
+
+        // Auto exposure details (optional nodes)
+        try_read("ExposureAutoUpperLimit (us)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "ExposureAutoUpperLimit")); });
+        try_read("ExposureAutoLowerLimit (us)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "ExposureAutoLowerLimit")); });
+        try_read("ExposureAutoLimitAuto", [](auto nm) {
+          GenICam::gcstring v = Arena::GetNodeValue<GenICam::gcstring>(nm, "ExposureAutoLimitAuto"); return std::string(v.c_str());
+        });
+        try_read("ExposureAutoAlgorithm", [](auto nm) {
+          GenICam::gcstring v = Arena::GetNodeValue<GenICam::gcstring>(nm, "ExposureAutoAlgorithm"); return std::string(v.c_str());
+        });
+        try_read("ExposureAutoDamping", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "ExposureAutoDamping")); });
+
+        // Misc
+        try_read("ShortExposureEnable", [](auto nm) {
+          return Arena::GetNodeValue<bool>(nm, "ShortExposureEnable") ? "true" : "false";
+        });
+        try_read("DevicePower (W)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "DevicePower")); });
+        try_read("DeviceUpTime (ms)", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "DeviceUpTime")); });
+        try_read("LinkUpTime (ms)", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "LinkUpTime")); });
+        try_read("DeviceTemperature (C)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "DeviceTemperature")); });
+
+        m_last_diag_genicam_read_time_ = now_diag;
+        m_diag_genicam_cache_valid_ = true;
+
+      } catch (GenICam::GenericException& e) {
+        m_diag_genicam_cache_.emplace_back("Camera Parameters", std::string("GenICam error: ") + e.what());
+        m_diag_genicam_cache_valid_ = true;
+        m_last_diag_genicam_read_time_ = now_diag;
+      } catch (const std::exception& e) {
+        m_diag_genicam_cache_.emplace_back("Camera Parameters", std::string("error: ") + e.what());
+        m_diag_genicam_cache_valid_ = true;
+        m_last_diag_genicam_read_time_ = now_diag;
+      } catch (...) {
+        m_diag_genicam_cache_.emplace_back("Camera Parameters", "unknown error reading camera parameters");
+        m_diag_genicam_cache_valid_ = true;
+        m_last_diag_genicam_read_time_ = now_diag;
+      }
+    }
+
+    // Report cached values
+    for (const auto& kv : m_diag_genicam_cache_) {
+      stat.add(kv.first, kv.second);
+    }
+    if (m_diag_genicam_cache_valid_) {
+      stat.add("Diag GenICam Age (sec)", std::to_string(
+          std::chrono::duration<double>(
+              std::chrono::steady_clock::now() - m_last_diag_genicam_read_time_).count()));
+    }
   }
 }
