@@ -1491,7 +1491,7 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                 const float* s2_ptr = reinterpret_cast<const float*>(S2.data);
                 uint8_t* aolp_ptr = aolp_u8.data;
                 
-                constexpr float inv_pi = 1.0f / static_cast<float>(M_PI);
+                constexpr float inv_pi = 1.0f / static_cast<float>(std::acos(-1.0));
                 for (size_t i = 0; i < total_pixels; i++) {
                   float angle = 0.5f * std::atan2(s2_ptr[i], s1_ptr[i]);  // [-π/2, π/2]
                   float normalized = angle * inv_pi + 0.5f;  // [0, 1]
@@ -1633,18 +1633,16 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                     cv::waitKey(1);  // flush the destroy event so the window actually closes
                     log_info("Debug display window closed by user - press Ctrl+C to fully stop the node");
                   } else if (key == 's' || key == 'S') {
-                    // Create session directory on first save
-                    if (save_session_dir_.empty()) {
-                      auto now = std::chrono::system_clock::now();
-                      auto time_t_now = std::chrono::system_clock::to_time_t(now);
-                      std::ostringstream oss;
-                      struct tm local_tm {};
-                      localtime_r(&time_t_now, &local_tm);
-                      oss << std::put_time(&local_tm, "%Y%m%d_%H%M%S");
-                      const char* home_env = getenv("HOME");
-                      std::string home = home_env ? home_env : "/tmp";
-                      save_session_dir_ = home + "/lucid_camera_images/session_" + oss.str();
-                    }
+                    // Create a new session directory on each save to avoid mixing sessions
+                    auto now = std::chrono::system_clock::now();
+                    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+                    std::ostringstream oss;
+                    struct tm local_tm {};
+                    localtime_r(&time_t_now, &local_tm);
+                    oss << std::put_time(&local_tm, "%Y%m%d_%H%M%S");
+                    const char* home_env = getenv("HOME");
+                    std::string home = home_env ? home_env : "/tmp";
+                    save_session_dir_ = home + "/lucid_camera_images/session_" + oss.str();
                     std::filesystem::create_directories(save_session_dir_);
                     
                     uint64_t frame_id = pImage->GetFrameId();
