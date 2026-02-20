@@ -42,7 +42,7 @@
  */
 
 #include <cstring>    // memcpy
-#include <cmath>      // std::atan2, M_PI
+#include <cmath>      // std::atan2, std::acos, std::clamp
 #include <algorithm>  // std::clamp
 #include <stdexcept>  // std::runtime_error
 #include <string>
@@ -83,6 +83,9 @@ namespace PixelFormat {
   // angles (0°, 45°, 90°, 135°) in a single Bayer pattern image.
   // Each 2x2 Bayer quad contains one pixel for each polarization angle.
   constexpr uint64_t PFNC_POLARIZED_BAYER_RG8 = 0x8220020F;
+  // Mono8 (GenICam PFNC standard value 0x01080001): single-channel 8-bit grayscale.
+  // Named MONO8 to avoid macro name collision with ArenaSDK's PFNC_Mono8 macro.
+  constexpr uint64_t MONO8 = 0x01080001;
 }
 
 // ============================================================================
@@ -423,6 +426,15 @@ void ArenaCameraNode::parse_parameters_()
     currentParam = "display_images";
     display_images_ = config_bool(m_config_params_, "display_images", false);
     display_images_active_ = display_images_;
+    // Disable display in headless environments (no X display available)
+    if (display_images_active_) {
+      const char* disp = getenv("DISPLAY");
+      if (!disp || disp[0] == '\0') {
+        log_warn("display_images is enabled but no DISPLAY environment variable is set. "
+                 "Disabling debug display (headless environment).");
+        display_images_active_ = false;
+      }
+    }
 
     currentParam = "jpeg_quality";
     jpeg_quality_ = config_int(m_config_params_, "jpeg_quality", 80);
@@ -753,6 +765,158 @@ void ArenaCameraNode::run_()
   }
 }
 
+void ArenaCameraNode::compute_and_publish_dolp_aolp_(
+    Arena::IImage* pImage,
+    const arena_camera::ArenaImageVector& channels,
+    cv::Mat* out_dolp,
+    cv::Mat* out_aolp)
+{
+  // Convert all 4 channels directly to Mono8.
+  // This avoids the BGR8 → grayscale intermediate step, which applies a
+  // luminance-weighted average (0.299R+0.587G+0.114B) that can introduce
+  // artifacts if the channels are not perfectly balanced.
+  arena_camera::ArenaImageVector mono_for_stokes;
+  bool stokes_valid = true;
+  for (size_t i = 0; i < 4; i++) {
+    Arena::IImage* converted = Arena::ImageFactory::Convert(channels[i], PixelFormat::MONO8);
+    mono_for_stokes.push_back(converted);
+    if (!converted || converted->GetPixelFormat() != PixelFormat::MONO8) {
+      log_warn("Stokes channel " + std::to_string(i) + ": unexpected pixel format after Mono8 conversion");
+      stokes_valid = false;
+    }
+  }
+
+  if (!stokes_valid) {
+    log_warn("Skipping DOLP/AoLP computation due to unexpected pixel format");
+    return;
+  }
+
+  size_t stokes_h = mono_for_stokes[0]->GetHeight();
+  size_t stokes_w = mono_for_stokes[0]->GetWidth();
+
+  // Convert Mono8 directly to float32 for each polarization angle
+  auto to_gray_float = [&](size_t idx) -> cv::Mat {
+    cv::Mat mono(stokes_h, stokes_w, CV_8UC1,
+                 const_cast<void*>(static_cast<const void*>(mono_for_stokes[idx]->GetData())));
+    cv::Mat mono_f;
+    mono.convertTo(mono_f, CV_32F);
+    return mono_f;
+  };
+
+  cv::Mat f0   = to_gray_float(0);   // I_0°
+  cv::Mat f45  = to_gray_float(1);   // I_45°
+  cv::Mat f90  = to_gray_float(2);   // I_90°
+  cv::Mat f135 = to_gray_float(3);   // I_135°
+
+  // Stokes parameters (vectorized OpenCV operations)
+  cv::Mat S0 = f0 + f90;       // Total intensity
+  cv::Mat S1 = f0 - f90;       // Horizontal vs vertical
+  cv::Mat S2 = f45 - f135;     // Diagonal
+
+  // --- DOLP ---
+  if (publish_dolp_ && m_pub_dolp_) {
+    cv::Mat S1_sq, S2_sq, numerator, dolp_float;
+    cv::multiply(S1, S1, S1_sq);
+    cv::multiply(S2, S2, S2_sq);
+    cv::sqrt(S1_sq + S2_sq, numerator);
+
+    // Safe division: clamp S0 to avoid division by zero
+    dolp_float = cv::Mat::zeros(stokes_h, stokes_w, CV_32F);
+    cv::Mat s0_safe;
+    cv::max(S0, 1e-5f, s0_safe);
+    cv::divide(numerator, s0_safe, dolp_float);
+    dolp_float.setTo(0.0f, S0 <= 1e-5f);  // Zero where S0 is negligible
+
+    // Clamp [0, 1] and scale to uint8 [0, 255]
+    cv::min(dolp_float, 1.0f, dolp_float);
+    cv::max(dolp_float, 0.0f, dolp_float);
+
+    cv::Mat dolp_u8;
+    dolp_float.convertTo(dolp_u8, CV_8U, 255.0);
+
+    if (out_dolp) *out_dolp = dolp_u8.clone();
+
+    // Publish raw DOLP (mono8)
+    {
+      auto msg = std::make_unique<sensor_msgs::msg::Image>();
+      msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
+      msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
+      msg->header.frame_id = std::to_string(pImage->GetFrameId());
+      msg->height = stokes_h;
+      msg->width = stokes_w;
+      msg->encoding = "mono8";
+      msg->is_bigendian = 0;
+      msg->step = stokes_w;
+      msg->data.assign(dolp_u8.data, dolp_u8.data + dolp_u8.total());
+      m_pub_dolp_->publish(std::move(msg));
+    }
+
+    // Publish compressed DOLP
+    if (publish_compressed_ && m_pub_dolp_compressed_) {
+      auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+      msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
+      msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
+      msg->header.frame_id = std::to_string(pImage->GetFrameId());
+      msg->format = "jpeg";
+      std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
+      cv::imencode(".jpg", dolp_u8, msg->data, params);
+      m_pub_dolp_compressed_->publish(std::move(msg));
+    }
+  }
+
+  // --- AoLP ---
+  if (publish_aolp_ && m_pub_aolp_) {
+    // AoLP = 0.5 * atan2(S2, S1)
+    // Range: [-π/2, +π/2] → mapped to [0, 255] uint8
+    // 0 → -90°, 128 → 0°, 255 → +90°
+    size_t total_pixels = stokes_h * stokes_w;
+    cv::Mat aolp_u8(static_cast<int>(stokes_h), static_cast<int>(stokes_w), CV_8U);
+
+    const float* s1_ptr = reinterpret_cast<const float*>(S1.data);
+    const float* s2_ptr = reinterpret_cast<const float*>(S2.data);
+    uint8_t* aolp_ptr = aolp_u8.data;
+
+    constexpr float inv_pi = 0.31830988618379067154f;  // 1.0f / π
+    for (size_t i = 0; i < total_pixels; i++) {
+      float angle = 0.5f * std::atan2(s2_ptr[i], s1_ptr[i]);  // [-π/2, π/2]
+      float normalized = angle * inv_pi + 0.5f;  // [0, 1]
+      aolp_ptr[i] = static_cast<uint8_t>(
+          std::clamp(normalized * 255.0f, 0.0f, 255.0f));
+    }
+
+    if (out_aolp) *out_aolp = aolp_u8.clone();
+
+    // Publish raw AoLP (mono8)
+    {
+      auto msg = std::make_unique<sensor_msgs::msg::Image>();
+      msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
+      msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
+      msg->header.frame_id = std::to_string(pImage->GetFrameId());
+      msg->height = stokes_h;
+      msg->width = stokes_w;
+      msg->encoding = "mono8";
+      msg->is_bigendian = 0;
+      msg->step = stokes_w;
+      msg->data.assign(aolp_u8.data, aolp_u8.data + aolp_u8.total());
+      m_pub_aolp_->publish(std::move(msg));
+    }
+
+    // Publish compressed AoLP
+    if (publish_compressed_ && m_pub_aolp_compressed_) {
+      auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+      msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
+      msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
+      msg->header.frame_id = std::to_string(pImage->GetFrameId());
+      msg->format = "jpeg";
+      std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
+      cv::imencode(".jpg", aolp_u8, msg->data, params);
+      m_pub_aolp_compressed_->publish(std::move(msg));
+    }
+  }
+
+  // mono_for_stokes automatically cleaned up by RAII when going out of scope
+}
+
 void ArenaCameraNode::publish_images_()
 {
   Arena::IImage* pImage = nullptr;
@@ -982,156 +1146,9 @@ void ArenaCameraNode::publish_images_()
                 }  // end else (all_valid)
               }
               
-              // ================================================================
-              // DOLP (Degree of Linear Polarization) and AoLP (Angle of Linear
-              // Polarization) from Stokes parameters.
-              // Channels: [0]=0°, [1]=45°, [2]=90°, [3]=135°
-              // S0 = I_0° + I_90°    (total intensity)
-              // S1 = I_0° - I_90°    (horizontal vs vertical polarization)
-              // S2 = I_45° - I_135°  (diagonal polarization)
-              // DOLP = sqrt(S1² + S2²) / S0        ∈ [0, 1] → mono8 [0, 255]
-              // AoLP = 0.5 × atan2(S2, S1)  ∈ [-90°, 90°] → mono8 [0, 255]
-              // ================================================================
+              // Compute and publish DOLP / AoLP via shared helper
               if ((publish_dolp_ && m_pub_dolp_) || (publish_aolp_ && m_pub_aolp_)) {
-                // Convert all 4 channels to BGR8, then extract grayscale
-                arena_camera::ArenaImageVector bgr_for_stokes;
-                bool stokes_valid = true;
-                for (size_t i = 0; i < 4; i++) {
-                  Arena::IImage* converted = Arena::ImageFactory::Convert(channels[i], PFNC_BGR8);
-                  bgr_for_stokes.push_back(converted);
-                  if (!validate_bgr8_format(converted, "stokes channel " + std::to_string(i))) {
-                    stokes_valid = false;
-                  }
-                }
-                
-                if (!stokes_valid) {
-                  log_warn("Skipping DOLP/AoLP computation due to unexpected pixel format");
-                } else {
-                
-                size_t stokes_h = bgr_for_stokes[0]->GetHeight();
-                size_t stokes_w = bgr_for_stokes[0]->GetWidth();
-                
-                // Convert BGR → Grayscale → float32 for each polarization angle
-                auto to_gray_float = [&](size_t idx) -> cv::Mat {
-                  cv::Mat bgr(stokes_h, stokes_w, CV_8UC3,
-                              const_cast<void*>(static_cast<const void*>(bgr_for_stokes[idx]->GetData())));
-                  cv::Mat gray;
-                  cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
-                  cv::Mat gray_f;
-                  gray.convertTo(gray_f, CV_32F);
-                  return gray_f;
-                };
-                
-                cv::Mat f0   = to_gray_float(0);   // I_0°
-                cv::Mat f45  = to_gray_float(1);   // I_45°
-                cv::Mat f90  = to_gray_float(2);   // I_90°
-                cv::Mat f135 = to_gray_float(3);   // I_135°
-                
-                // Stokes parameters (vectorized OpenCV operations)
-                cv::Mat S0 = f0 + f90;       // Total intensity
-                cv::Mat S1 = f0 - f90;       // Horizontal vs vertical
-                cv::Mat S2 = f45 - f135;     // Diagonal
-                
-                // --- DOLP ---
-                if (publish_dolp_ && m_pub_dolp_) {
-                  cv::Mat S1_sq, S2_sq, numerator, dolp_float;
-                  cv::multiply(S1, S1, S1_sq);
-                  cv::multiply(S2, S2, S2_sq);
-                  cv::sqrt(S1_sq + S2_sq, numerator);
-                  
-                  // Safe division: clamp S0 to avoid division by zero
-                  dolp_float = cv::Mat::zeros(stokes_h, stokes_w, CV_32F);
-                  cv::Mat s0_safe;
-                  cv::max(S0, 1e-5f, s0_safe);
-                  cv::divide(numerator, s0_safe, dolp_float);
-                  dolp_float.setTo(0.0f, S0 <= 1e-5f);  // Zero where S0 is negligible
-                  
-                  // Clamp [0, 1] and scale to uint8 [0, 255]
-                  cv::min(dolp_float, 1.0f, dolp_float);
-                  cv::max(dolp_float, 0.0f, dolp_float);
-                  
-                  cv::Mat dolp_u8;
-                  dolp_float.convertTo(dolp_u8, CV_8U, 255.0);
-                  
-                  // Publish raw DOLP (mono8)
-                  {
-                    auto msg = std::make_unique<sensor_msgs::msg::Image>();
-                    msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                    msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                    msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                    msg->height = stokes_h;
-                    msg->width = stokes_w;
-                    msg->encoding = "mono8";
-                    msg->is_bigendian = 0;
-                    msg->step = stokes_w;
-                    msg->data.assign(dolp_u8.data, dolp_u8.data + dolp_u8.total());
-                    m_pub_dolp_->publish(std::move(msg));
-                  }
-                  
-                  // Publish compressed DOLP
-                  if (publish_compressed_ && m_pub_dolp_compressed_) {
-                    auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-                    msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                    msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                    msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                    msg->format = "jpeg";
-                    std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-                    cv::imencode(".jpg", dolp_u8, msg->data, params);
-                    m_pub_dolp_compressed_->publish(std::move(msg));
-                  }
-                }
-                
-                // --- AoLP ---
-                if (publish_aolp_ && m_pub_aolp_) {
-                  // AoLP = 0.5 * atan2(S2, S1)
-                  // Range: [-π/2, +π/2] → mapped to [0, 255] uint8
-                  // 0 → -90°, 128 → 0°, 255 → +90°
-                  size_t total_pixels = stokes_h * stokes_w;
-                  cv::Mat aolp_u8(static_cast<int>(stokes_h), static_cast<int>(stokes_w), CV_8U);
-                  
-                  const float* s1_ptr = reinterpret_cast<const float*>(S1.data);
-                  const float* s2_ptr = reinterpret_cast<const float*>(S2.data);
-                  uint8_t* aolp_ptr = aolp_u8.data;
-                  
-                  constexpr float inv_pi = 0.31830988618379067154f;  // 1.0f / π
-                  for (size_t i = 0; i < total_pixels; i++) {
-                    float angle = 0.5f * std::atan2(s2_ptr[i], s1_ptr[i]);  // [-π/2, π/2]
-                    // Map [-π/2, π/2] → [0, 1] → [0, 255]
-                    float normalized = angle * inv_pi + 0.5f;
-                    aolp_ptr[i] = static_cast<uint8_t>(
-                        std::clamp(normalized * 255.0f, 0.0f, 255.0f));
-                  }
-                  
-                  // Publish raw AoLP (mono8)
-                  {
-                    auto msg = std::make_unique<sensor_msgs::msg::Image>();
-                    msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                    msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                    msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                    msg->height = stokes_h;
-                    msg->width = stokes_w;
-                    msg->encoding = "mono8";
-                    msg->is_bigendian = 0;
-                    msg->step = stokes_w;
-                    msg->data.assign(aolp_u8.data, aolp_u8.data + aolp_u8.total());
-                    m_pub_aolp_->publish(std::move(msg));
-                  }
-                  
-                  // Publish compressed AoLP
-                  if (publish_compressed_ && m_pub_aolp_compressed_) {
-                    auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-                    msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                    msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                    msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                    msg->format = "jpeg";
-                    std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-                    cv::imencode(".jpg", aolp_u8, msg->data, params);
-                    m_pub_aolp_compressed_->publish(std::move(msg));
-                  }
-                }
-                
-                // bgr_for_stokes automatically cleaned up by RAII when going out of scope
-                }  // end else (stokes_valid)
+                compute_and_publish_dolp_aolp_(pImage, channels);
               }
             }
             
@@ -1380,157 +1397,11 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
               }  // end all_valid
             }
             
-            // ==============================================================
-            // DOLP (Degree of Linear Polarization) and AoLP (Angle of Linear
-            // Polarization) from Stokes parameters.
-            // Channels: [0]=0°, [1]=45°, [2]=90°, [3]=135°
-            // S0 = I_0° + I_90°    (total intensity)
-            // S1 = I_0° - I_90°    (horizontal vs vertical polarization)
-            // S2 = I_45° - I_135°  (diagonal polarization)
-            // DOLP = sqrt(S1² + S2²) / S0        ∈ [0, 1] → mono8 [0, 255]
-            // AoLP = 0.5 × atan2(S2, S1)  ∈ [-90°, 90°] → mono8 [0, 255]
-            // ==============================================================
+            // Compute and publish DOLP / AoLP; capture display images if needed
             if ((publish_dolp_ && m_pub_dolp_) || (publish_aolp_ && m_pub_aolp_)) {
-              // Convert all 4 channels to BGR8, then extract grayscale
-              arena_camera::ArenaImageVector bgr_for_stokes;
-              bool stokes_valid = true;
-              for (size_t i = 0; i < 4; i++) {
-                Arena::IImage* converted = Arena::ImageFactory::Convert(channels[i], PFNC_BGR8);
-                bgr_for_stokes.push_back(converted);
-                if (!validate_bgr8_format(converted, "stokes channel " + std::to_string(i))) {
-                  stokes_valid = false;
-                }
-              }
-              
-              if (!stokes_valid) {
-                log_warn("Skipping DOLP/AoLP computation due to unexpected pixel format");
-              } else {
-              
-              size_t stokes_h = bgr_for_stokes[0]->GetHeight();
-              size_t stokes_w = bgr_for_stokes[0]->GetWidth();
-              
-              // Convert BGR → Grayscale → float32 for each polarization angle
-              auto to_gray_float = [&](size_t idx) -> cv::Mat {
-                cv::Mat bgr(stokes_h, stokes_w, CV_8UC3,
-                            const_cast<void*>(static_cast<const void*>(bgr_for_stokes[idx]->GetData())));
-                cv::Mat gray;
-                cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
-                cv::Mat gray_f;
-                gray.convertTo(gray_f, CV_32F);
-                return gray_f;
-              };
-              
-              cv::Mat f0   = to_gray_float(0);   // I_0°
-              cv::Mat f45  = to_gray_float(1);   // I_45°
-              cv::Mat f90  = to_gray_float(2);   // I_90°
-              cv::Mat f135 = to_gray_float(3);   // I_135°
-              
-              // Stokes parameters (vectorized OpenCV operations)
-              cv::Mat S0 = f0 + f90;       // Total intensity
-              cv::Mat S1 = f0 - f90;       // Horizontal vs vertical
-              cv::Mat S2 = f45 - f135;     // Diagonal
-              
-              // --- DOLP ---
-              if (publish_dolp_ && m_pub_dolp_) {
-                cv::Mat S1_sq, S2_sq, numerator, dolp_float;
-                cv::multiply(S1, S1, S1_sq);
-                cv::multiply(S2, S2, S2_sq);
-                cv::sqrt(S1_sq + S2_sq, numerator);
-                
-                // Safe division: clamp S0 to avoid division by zero
-                dolp_float = cv::Mat::zeros(stokes_h, stokes_w, CV_32F);
-                cv::Mat s0_safe;
-                cv::max(S0, 1e-5f, s0_safe);
-                cv::divide(numerator, s0_safe, dolp_float);
-                dolp_float.setTo(0.0f, S0 <= 1e-5f);  // Zero where S0 is negligible
-                
-                // Clamp [0, 1] and scale to uint8 [0, 255]
-                cv::min(dolp_float, 1.0f, dolp_float);
-                cv::max(dolp_float, 0.0f, dolp_float);
-                
-                cv::Mat dolp_u8;
-                dolp_float.convertTo(dolp_u8, CV_8U, 255.0);
-                
-                // Capture for debug display window
-                if (display_images_active_) display_dolp = dolp_u8.clone();
-                
-                // Publish raw DOLP (mono8)
-                {
-                  auto msg = std::make_unique<sensor_msgs::msg::Image>();
-                  msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                  msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                  msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                  msg->height = stokes_h;
-                  msg->width = stokes_w;
-                  msg->encoding = "mono8";
-                  msg->is_bigendian = 0;
-                  msg->step = stokes_w;
-                  msg->data.assign(dolp_u8.data, dolp_u8.data + dolp_u8.total());
-                  m_pub_dolp_->publish(std::move(msg));
-                }
-                
-                // Publish compressed DOLP
-                if (publish_compressed_ && m_pub_dolp_compressed_) {
-                  auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-                  msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                  msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                  msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                  msg->format = "jpeg";
-                  std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-                  cv::imencode(".jpg", dolp_u8, msg->data, params);
-                  m_pub_dolp_compressed_->publish(std::move(msg));
-                }
-              }
-              
-              // --- AoLP ---
-              if (publish_aolp_ && m_pub_aolp_) {
-                size_t total_pixels = stokes_h * stokes_w;
-                cv::Mat aolp_u8(static_cast<int>(stokes_h), static_cast<int>(stokes_w), CV_8U);
-                
-                const float* s1_ptr = reinterpret_cast<const float*>(S1.data);
-                const float* s2_ptr = reinterpret_cast<const float*>(S2.data);
-                uint8_t* aolp_ptr = aolp_u8.data;
-                
-                constexpr float inv_pi = 1.0f / static_cast<float>(std::acos(-1.0));
-                for (size_t i = 0; i < total_pixels; i++) {
-                  float angle = 0.5f * std::atan2(s2_ptr[i], s1_ptr[i]);  // [-π/2, π/2]
-                  float normalized = angle * inv_pi + 0.5f;  // [0, 1]
-                  aolp_ptr[i] = static_cast<uint8_t>(
-                      std::clamp(normalized * 255.0f, 0.0f, 255.0f));
-                }
-                
-                // Capture for debug display window
-                if (display_images_active_) display_aolp = aolp_u8.clone();
-                
-                // Publish raw AoLP (mono8)
-                {
-                  auto msg = std::make_unique<sensor_msgs::msg::Image>();
-                  msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                  msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                  msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                  msg->height = stokes_h;
-                  msg->width = stokes_w;
-                  msg->encoding = "mono8";
-                  msg->is_bigendian = 0;
-                  msg->step = stokes_w;
-                  msg->data.assign(aolp_u8.data, aolp_u8.data + aolp_u8.total());
-                  m_pub_aolp_->publish(std::move(msg));
-                }
-                
-                // Publish compressed AoLP
-                if (publish_compressed_ && m_pub_aolp_compressed_) {
-                  auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-                  msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                  msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                  msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                  msg->format = "jpeg";
-                  std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-                  cv::imencode(".jpg", aolp_u8, msg->data, params);
-                  m_pub_aolp_compressed_->publish(std::move(msg));
-                }
-              }
-              
-              }  // end else (stokes_valid)
+              compute_and_publish_dolp_aolp_(pImage, channels,
+                  display_images_active_ ? &display_dolp : nullptr,
+                  display_images_active_ ? &display_aolp : nullptr);
             }
             
             // ==============================================================
@@ -1540,7 +1411,20 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
             // Press 's' to save all tiles, 'q' to close window
             // ==============================================================
             if (display_images_active_) {
+              // Frame-skip: only render the display every 3rd frame to reduce CPU load at high FPS.
+              // cv::waitKey(1) is still called (via the inner if) to keep the window responsive.
+              bool render_this_frame = ((++m_display_frame_counter_) % 3) == 0;
               try {
+                if (!render_this_frame) {
+                  // Still pump the event loop so keystrokes are not dropped
+                  int key = cv::waitKey(1) & 0xFF;
+                  if (key == 'q' || key == 'Q') {
+                    display_images_active_ = false;
+                    cv::destroyAllWindows();
+                    cv::waitKey(1);
+                    log_info("Debug display window closed by user");
+                  }
+                } else {
                 // Determine tile size from first available channel
                 int tile_w = 0, tile_h = 0;
                 for (int i = 0; i < 4; i++) {
@@ -1602,12 +1486,10 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                     fps_ss << std::fixed << std::setprecision(1) << m_calculated_fps_;
                     put_line("FPS: " + fps_ss.str());
                     
-                    // Look up values from diagnostics cache
+                    // Look up values from diagnostics cache (O(1) map lookup)
                     auto cache_value = [&](const std::string& key) -> std::string {
-                      for (const auto& kv : m_diag_genicam_cache_) {
-                        if (kv.first == key) return kv.second;
-                      }
-                      return "N/A";
+                      auto it = m_diag_genicam_cache_.find(key);
+                      return (it != m_diag_genicam_cache_.end()) ? it->second : "N/A";
                     };
                     
                     put_line("ExposureTime: " + cache_value("ExposureTime (us)") + " us");
@@ -1666,6 +1548,7 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                              " (frame " + std::to_string(frame_id) + ")");
                   }
                 }
+                }  // end else (render_this_frame)
               } catch (const std::exception& e) {
                 log_warn(std::string("Debug display error: ") + e.what());
                 display_images_active_ = false;
@@ -2176,8 +2059,7 @@ void ArenaCameraNode::set_nodes_exposure_()
           for (const auto& entry : entries) {
             log_warn(std::string("\t  - ") + entry.c_str());
           }
-          log_warn("\tSkipping ExposureAuto setting.");
-          return;
+          log_warn("\tSkipping ExposureAuto setting. Other exposure parameters will still be applied.");
         }
       } else {
         // Detailed diagnostic: why is the node not writable?
@@ -2196,12 +2078,10 @@ void ArenaCameraNode::set_nodes_exposure_()
           GenICam::gcstring trig = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode");
           reason += " TriggerMode: " + std::string(trig.c_str()) + ".";
         } catch (...) {}
-        log_warn(std::string("\t") + reason);
-        return;
+        log_warn(std::string("\t") + reason + " Other exposure parameters will still be applied.");
       }
     } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ExposureAuto: ") + e.what());
-      return;
+      log_warn(std::string("\tFailed to set ExposureAuto: ") + e.what() + ". Other exposure parameters will still be applied.");
     }
   }
 
@@ -2547,7 +2427,7 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
 
         // Helper: attempt a read, cache on success, silently skip on failure
         auto try_read = [&](const char* diag_key, auto reader) {
-          try { m_diag_genicam_cache_.emplace_back(diag_key, reader(nodemap)); } catch (...) {}
+          try { m_diag_genicam_cache_[diag_key] = reader(nodemap); } catch (...) {}
         };
 
         // Frame rate
@@ -2602,15 +2482,15 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
         m_diag_genicam_cache_valid_ = true;
 
       } catch (GenICam::GenericException& e) {
-        m_diag_genicam_cache_.emplace_back("Camera Parameters", std::string("GenICam error: ") + e.what());
+        m_diag_genicam_cache_["Camera Parameters"] = std::string("GenICam error: ") + e.what();
         m_diag_genicam_cache_valid_ = true;
         m_last_diag_genicam_read_time_ = now_diag;
       } catch (const std::exception& e) {
-        m_diag_genicam_cache_.emplace_back("Camera Parameters", std::string("error: ") + e.what());
+        m_diag_genicam_cache_["Camera Parameters"] = std::string("error: ") + e.what();
         m_diag_genicam_cache_valid_ = true;
         m_last_diag_genicam_read_time_ = now_diag;
       } catch (...) {
-        m_diag_genicam_cache_.emplace_back("Camera Parameters", "unknown error reading camera parameters");
+        m_diag_genicam_cache_["Camera Parameters"] = "unknown error reading camera parameters";
         m_diag_genicam_cache_valid_ = true;
         m_last_diag_genicam_read_time_ = now_diag;
       }

@@ -36,6 +36,10 @@
 
 // arena sdk
 #include "ArenaApi.h"
+#include "arena_image_raii.h"
+
+// OpenCV (for cv::Mat in compute_and_publish_dolp_aolp_ signature)
+#include <opencv2/core.hpp>
 
 class ArenaCameraNode : public rclcpp::Node
 {
@@ -314,9 +318,10 @@ class ArenaCameraNode : public rclcpp::Node
   bool publish_aolp_;
   
   // Debug display window (OpenCV imshow)
-  bool display_images_;       // Config: show tiled debug window
-  bool display_images_active_; // Runtime: toggled off by 'q' keypress
-  std::string save_session_dir_;  // Created on first 's' keypress
+  bool display_images_;               // Config: show tiled debug window
+  std::atomic<bool> display_images_active_{false}; // Runtime: toggled off by 'q' keypress (atomic for thread safety)
+  std::string save_session_dir_;      // Created on first 's' keypress
+  uint64_t m_display_frame_counter_{0};  // For display frame-skipping at high FPS
   
   int jpeg_quality_;  // JPEG compression quality (1-100, default 80)
   
@@ -327,10 +332,10 @@ class ArenaCameraNode : public rclcpp::Node
   bool m_camera_frozen_{false};  // Whether the camera is currently detected as frozen
 
   // Diagnostics GenICam read cache — rate-limited to avoid stalling GigE stream
-  static constexpr double DIAG_GENICAM_READ_INTERVAL_SEC = 1.0;
+  static constexpr double DIAG_GENICAM_READ_INTERVAL_SEC = 10.0;
   std::chrono::steady_clock::time_point m_last_diag_genicam_read_time_{};
   bool m_diag_genicam_cache_valid_{false};
-  std::vector<std::pair<std::string, std::string>> m_diag_genicam_cache_;
+  std::map<std::string, std::string> m_diag_genicam_cache_;
 
   YAML::Node m_config_params_;
 
@@ -363,4 +368,12 @@ class ArenaCameraNode : public rclcpp::Node
 
   // Diagnostics
   void produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat);
+
+  // Shared helper: compute DOLP and AoLP from 4 polarization channels and publish.
+  // out_dolp / out_aolp (optional) receive clones of the computed images for display.
+  void compute_and_publish_dolp_aolp_(
+      Arena::IImage* pImage,
+      const arena_camera::ArenaImageVector& channels,
+      cv::Mat* out_dolp = nullptr,
+      cv::Mat* out_aolp = nullptr);
 };
