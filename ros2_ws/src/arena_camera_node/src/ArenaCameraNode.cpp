@@ -985,12 +985,7 @@ void ArenaCameraNode::publish_images_()
               // DOLP = sqrt(S1² + S2²) / S0        ∈ [0, 1] → mono8 [0, 255]
               // AoLP = 0.5 × atan2(S2, S1)  ∈ [-90°, 90°] → mono8 [0, 255]
               // ================================================================
-              log_debug("DOLP/AoLP guard: publish_dolp_=" + std::to_string(publish_dolp_) +
-                        " m_pub_dolp_=" + std::to_string(!!m_pub_dolp_) +
-                        " publish_aolp_=" + std::to_string(publish_aolp_) +
-                        " m_pub_aolp_=" + std::to_string(!!m_pub_aolp_));
               if ((publish_dolp_ && m_pub_dolp_) || (publish_aolp_ && m_pub_aolp_)) {
-                log_info("Computing DOLP/AoLP from Stokes parameters");
                 // Convert all 4 channels to BGR8, then extract grayscale
                 arena_camera::ArenaImageVector bgr_for_stokes;
                 bool stokes_valid = true;
@@ -1064,7 +1059,6 @@ void ArenaCameraNode::publish_images_()
                     msg->step = stokes_w;
                     msg->data.assign(dolp_u8.data, dolp_u8.data + dolp_u8.total());
                     m_pub_dolp_->publish(std::move(msg));
-                    log_info("Published DOLP raw " + std::to_string(stokes_w) + "x" + std::to_string(stokes_h));
                   }
                   
                   // Publish compressed DOLP
@@ -1076,7 +1070,6 @@ void ArenaCameraNode::publish_images_()
                     msg->format = "jpeg";
                     std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
                     cv::imencode(".jpg", dolp_u8, msg->data, params);
-                    log_info("Published DOLP compressed, size=" + std::to_string(msg->data.size()));
                     m_pub_dolp_compressed_->publish(std::move(msg));
                   }
                 }
@@ -1115,7 +1108,6 @@ void ArenaCameraNode::publish_images_()
                     msg->step = stokes_w;
                     msg->data.assign(aolp_u8.data, aolp_u8.data + aolp_u8.total());
                     m_pub_aolp_->publish(std::move(msg));
-                    log_info("Published AoLP raw " + std::to_string(stokes_w) + "x" + std::to_string(stokes_h));
                   }
                   
                   // Publish compressed AoLP
@@ -1127,7 +1119,6 @@ void ArenaCameraNode::publish_images_()
                     msg->format = "jpeg";
                     std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
                     cv::imencode(".jpg", aolp_u8, msg->data, params);
-                    log_info("Published AoLP compressed, size=" + std::to_string(msg->data.size()));
                     m_pub_aolp_compressed_->publish(std::move(msg));
                   }
                 }
