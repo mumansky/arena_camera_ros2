@@ -84,7 +84,8 @@ namespace PixelFormat {
   // Each 2x2 Bayer quad contains one pixel for each polarization angle.
   constexpr uint64_t PFNC_POLARIZED_BAYER_RG8 = 0x8220020F;
   // Mono8 (GenICam PFNC standard value 0x01080001): single-channel 8-bit grayscale.
-  constexpr uint64_t PFNC_Mono8 = 0x01080001;
+  // Named MONO8 to avoid macro name collision with ArenaSDK's PFNC_Mono8 macro.
+  constexpr uint64_t MONO8 = 0x01080001;
 }
 
 // ============================================================================
@@ -777,9 +778,9 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
   arena_camera::ArenaImageVector mono_for_stokes;
   bool stokes_valid = true;
   for (size_t i = 0; i < 4; i++) {
-    Arena::IImage* converted = Arena::ImageFactory::Convert(channels[i], PixelFormat::PFNC_Mono8);
+    Arena::IImage* converted = Arena::ImageFactory::Convert(channels[i], PixelFormat::MONO8);
     mono_for_stokes.push_back(converted);
-    if (!converted || converted->GetPixelFormat() != PixelFormat::PFNC_Mono8) {
+    if (!converted || converted->GetPixelFormat() != PixelFormat::MONO8) {
       log_warn("Stokes channel " + std::to_string(i) + ": unexpected pixel format after Mono8 conversion");
       stokes_valid = false;
     }
