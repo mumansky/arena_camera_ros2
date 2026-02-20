@@ -1411,20 +1411,7 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
             // Press 's' to save all tiles, 'q' to close window
             // ==============================================================
             if (display_images_active_) {
-              // Frame-skip: only render the display every 3rd frame to reduce CPU load at high FPS.
-              // cv::waitKey(1) is still called (via the inner if) to keep the window responsive.
-              bool render_this_frame = ((++m_display_frame_counter_) % 3) == 0;
               try {
-                if (!render_this_frame) {
-                  // Still pump the event loop so keystrokes are not dropped
-                  int key = cv::waitKey(1) & 0xFF;
-                  if (key == 'q' || key == 'Q') {
-                    display_images_active_ = false;
-                    cv::destroyAllWindows();
-                    cv::waitKey(1);
-                    log_info("Debug display window closed by user");
-                  }
-                } else {
                 // Determine tile size from first available channel
                 int tile_w = 0, tile_h = 0;
                 for (int i = 0; i < 4; i++) {
@@ -1548,7 +1535,6 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                              " (frame " + std::to_string(frame_id) + ")");
                   }
                 }
-                }  // end else (render_this_frame)
               } catch (const std::exception& e) {
                 log_warn(std::string("Debug display error: ") + e.what());
                 display_images_active_ = false;

@@ -321,7 +321,6 @@ class ArenaCameraNode : public rclcpp::Node
   bool display_images_;               // Config: show tiled debug window
   std::atomic<bool> display_images_active_{false}; // Runtime: toggled off by 'q' keypress (atomic for thread safety)
   std::string save_session_dir_;      // Created on first 's' keypress
-  uint64_t m_display_frame_counter_{0};  // For display frame-skipping at high FPS
   
   int jpeg_quality_;  // JPEG compression quality (1-100, default 80)
   
