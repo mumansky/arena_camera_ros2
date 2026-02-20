@@ -31,6 +31,12 @@ Keep answers and edits tightly scoped. Prefer small, safe changes: implement mis
      - `colcon build --symlink-install`
      - `source install/setup.bash`
 
+- Running tests (after building):
+  - `colcon test --packages-select arena_camera_node`
+  - View results: `colcon test-result --verbose`
+  - Four GTest suites exist under `test/`: `test_pixelformat_translation`, `test_qos_translation`, `test_arena_image_raii`, `test_config_helpers`.
+  - These tests are unit-level and do **not** require a physical camera.
+
 - Quick run examples (exact invocations appear in README and useful commands file):
   - Start node (defaults to first discovered camera):
     - `ros2 run arena_camera_node start --ros-args -p topic:=/arena_camera_node/images`
@@ -42,6 +48,7 @@ Keep answers and edits tightly scoped. Prefer small, safe changes: implement mis
   - The repo includes entrypoint scripts that set `LD_LIBRARY_PATH` so ArenaSDK libs are found. When editing Dockerfiles or entrypoints, preserve `LD_LIBRARY_PATH` manipulation (see `arena_camera_ros_entrypoint.sh`).
 
 ## Project-specific conventions and patterns
+- Code style: C++ sources are formatted with `clang-format` using the config in `.clang-format` at the repo root (Google style, 2-space indent, Linux brace style). Run `clang-format -i <file>` to auto-format before committing.
 - Parameters: the node uses `declare_parameter` and checks presence with flags like `is_passed_*`. When adding parameters, follow the same pattern and update `parse_parameters_()`.
 - Logging: wrapper methods `log_info`, `log_debug`, `log_warn`, `log_err` are used instead of direct RCLCPP macros — keep using those wrappers for consistent messages.
 - QoS & pixel-format: mappings live under `rclcpp_adapter/`. Use those translation maps (`K_ROS2_PIXELFORMAT_TO_PFNC`, etc.) rather than inventing new mappings.
