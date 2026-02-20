@@ -36,6 +36,10 @@
 
 // arena sdk
 #include "ArenaApi.h"
+#include "arena_image_raii.h"
+
+// OpenCV (for cv::Mat in compute_and_publish_dolp_aolp_ signature)
+#include <opencv2/core.hpp>
 
 class ArenaCameraNode : public rclcpp::Node
 {
@@ -198,6 +202,10 @@ class ArenaCameraNode : public rclcpp::Node
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_pol_135deg_compressed_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_pol_max_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_pol_max_compressed_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_dolp_;
+  rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_dolp_compressed_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_aolp_;
+  rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_aolp_compressed_;
   rclcpp::TimerBase::SharedPtr m_wait_for_device_timer_callback_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr m_trigger_an_image_srv_;
   
@@ -306,6 +314,13 @@ class ArenaCameraNode : public rclcpp::Node
 
   bool publish_raw_;
   bool publish_compressed_;
+  bool publish_dolp_;
+  bool publish_aolp_;
+  
+  // Debug display window (OpenCV imshow)
+  bool display_images_;               // Config: show tiled debug window
+  std::atomic<bool> display_images_active_{false}; // Runtime: toggled off by 'q' keypress (atomic for thread safety)
+  std::string save_session_dir_;      // Created on first 's' keypress
   
   int jpeg_quality_;  // JPEG compression quality (1-100, default 80)
   
@@ -352,4 +367,12 @@ class ArenaCameraNode : public rclcpp::Node
 
   // Diagnostics
   void produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat);
+
+  // Shared helper: compute DOLP and AoLP from 4 polarization channels and publish.
+  // out_dolp / out_aolp (optional) receive clones of the computed images for display.
+  void compute_and_publish_dolp_aolp_(
+      Arena::IImage* pImage,
+      const arena_camera::ArenaImageVector& channels,
+      cv::Mat* out_dolp = nullptr,
+      cv::Mat* out_aolp = nullptr);
 };

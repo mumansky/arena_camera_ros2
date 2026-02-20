@@ -69,24 +69,24 @@
     # exposure_time: 10000.0  # 10ms exposure
     # Auto exposure mode (device-dependent). Common values: "Off", "Once", "Continuous"
     # When set to "Once" or "Continuous", manual exposure_time is ignored.
-    auto_exposure: "Continuous"
+    #auto_exposure: "Continuous"
     # Enable shorter exposure times than normally available
     # When true, allows exposure times below the standard minimum limit
-    short_exposure_enable: false    
+    #short_exposure_enable: true    
     # Advanced Auto Exposure Control
     # ------------------------------
     # Algorithm for auto exposure calculation. Common values: "Mean", "Median" 
-    # exposure_auto_algorithm: "Mean"
+    #exposure_auto_algorithm: "Mean"
     # Target brightness value for auto exposure (0-255, typically 128)
-    # target_brightness: 128
+    target_brightness: 30
     # Response speed for auto exposure changes (0-100, higher = slower response)
-    # exposure_auto_damping: 89.8
+    #exposure_auto_damping: 20.0          # much faster convergence (default ~90)
     # Auto limit control: "Off" (manual limits), "Continuous" (auto-calculated limits)
-    # exposure_auto_limit_auto: "Off"
+    #exposure_auto_limit_auto: "Off"       # take manual control of limits
     # Manual upper limit for auto exposure in microseconds (when limit_auto is "Off")
-    # exposure_auto_upper_limit: 10000.0  # 10ms
+    #exposure_auto_upper_limit: 10000.0    # cap at 10ms — forces faster exposure
     # Manual lower limit for auto exposure in microseconds (when limit_auto is "Off")  
-    # exposure_auto_lower_limit: 50.0     # 50us    
+    #exposure_auto_lower_limit: 50.0       # allow down to 50us    
     # Frame Rate Control
     # ------------------
     # Enable manual control of the acquisition frame rate
@@ -121,6 +121,22 @@
     # Note: You can enable both to publish raw and compressed simultaneously
     # Compressed images are published to <topic>/compressed
     # For polarized cameras, applies to both main topic and /pol_0deg channel
+    
+    # Polarization Analysis Topics (polarized cameras only)
+    # ---------------------------------------------------
+    # Degree of Linear Polarization (DOLP): mono8 image where 0=unpolarized, 255=fully polarized
+    # Computed from Stokes parameters: DOLP = sqrt(S1² + S2²) / S0
+    publish_dolp: true
+    # Angle of Linear Polarization (AoLP): mono8 image mapping [-90°,+90°] to [0,255]
+    # Computed from Stokes parameters: AoLP = 0.5 * atan2(S2, S1)
+    publish_aolp: true
+    
+    # Debug Display Window
+    # --------------------
+    # Show a tiled OpenCV window with all polarization channels, max-combined,
+    # DOLP, and AoLP images. Press 's' to save all tiles as PNGs, 'q' to close.
+    # Only works when running with a display (not headless/Docker).
+    display_images: true
     
     # JPEG Compression Quality
     # ------------------------

@@ -42,11 +42,16 @@
  */
 
 #include <cstring>    // memcpy
+#include <cmath>      // std::atan2, std::acos, std::clamp
+#include <algorithm>  // std::clamp
 #include <stdexcept>  // std::runtime_error
 #include <string>
 #include <fstream>    // file I/O
 #include <vector>     // vector
 #include <cstdlib>    // getenv
+#include <filesystem> // directory creation for image saving
+#include <iomanip>    // put_time for session directory naming
+#include <sstream>    // ostringstream for diagnostics overlay
 #include <yaml-cpp/yaml.h>  // YAML parsing
 
 // OpenCV
@@ -78,6 +83,9 @@ namespace PixelFormat {
   // angles (0°, 45°, 90°, 135°) in a single Bayer pattern image.
   // Each 2x2 Bayer quad contains one pixel for each polarization angle.
   constexpr uint64_t PFNC_POLARIZED_BAYER_RG8 = 0x8220020F;
+  // Mono8 (GenICam PFNC standard value 0x01080001): single-channel 8-bit grayscale.
+  // Named MONO8 to avoid macro name collision with ArenaSDK's PFNC_Mono8 macro.
+  constexpr uint64_t MONO8 = 0x01080001;
 }
 
 // ============================================================================
@@ -409,6 +417,25 @@ void ArenaCameraNode::parse_parameters_()
     currentParam = "publish_compressed";
     publish_compressed_ = config_bool(m_config_params_, "publish_compressed", false);
 
+    currentParam = "publish_dolp";
+    publish_dolp_ = config_bool(m_config_params_, "publish_dolp", false);
+
+    currentParam = "publish_aolp";
+    publish_aolp_ = config_bool(m_config_params_, "publish_aolp", false);
+
+    currentParam = "display_images";
+    display_images_ = config_bool(m_config_params_, "display_images", false);
+    display_images_active_ = display_images_;
+    // Disable display in headless environments (no X display available)
+    if (display_images_active_) {
+      const char* disp = getenv("DISPLAY");
+      if (!disp || disp[0] == '\0') {
+        log_warn("display_images is enabled but no DISPLAY environment variable is set. "
+                 "Disabling debug display (headless environment).");
+        display_images_active_ = false;
+      }
+    }
+
     currentParam = "jpeg_quality";
     jpeg_quality_ = config_int(m_config_params_, "jpeg_quality", 80);
 
@@ -566,6 +593,26 @@ void ArenaCameraNode::initialize_()
     m_pub_pol_max_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
         topic_ + "/pol_max/compressed", pub_qos_);
   }
+  
+  // Create publishers for DOLP (Degree of Linear Polarization) — mono8
+  if (is_polarized && publish_dolp_) {
+    m_pub_dolp_ = this->create_publisher<sensor_msgs::msg::Image>(
+        topic_ + "/dolp", pub_qos_);
+    if (publish_compressed_) {
+      m_pub_dolp_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
+          topic_ + "/dolp/compressed", pub_qos_);
+    }
+  }
+  
+  // Create publishers for AoLP (Angle of Linear Polarization) — mono8
+  if (is_polarized && publish_aolp_) {
+    m_pub_aolp_ = this->create_publisher<sensor_msgs::msg::Image>(
+        topic_ + "/aolp", pub_qos_);
+    if (publish_compressed_) {
+      m_pub_aolp_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
+          topic_ + "/aolp/compressed", pub_qos_);
+    }
+  }
 
   std::stringstream pub_qos_info;
   auto pub_qos_profile = pub_qos_.get_rmw_qos_profile();
@@ -716,6 +763,158 @@ void ArenaCameraNode::run_()
   } else {
     log_info("Trigger mode enabled - waiting for trigger service calls");
   }
+}
+
+void ArenaCameraNode::compute_and_publish_dolp_aolp_(
+    Arena::IImage* pImage,
+    const arena_camera::ArenaImageVector& channels,
+    cv::Mat* out_dolp,
+    cv::Mat* out_aolp)
+{
+  // Convert all 4 channels directly to Mono8.
+  // This avoids the BGR8 → grayscale intermediate step, which applies a
+  // luminance-weighted average (0.299R+0.587G+0.114B) that can introduce
+  // artifacts if the channels are not perfectly balanced.
+  arena_camera::ArenaImageVector mono_for_stokes;
+  bool stokes_valid = true;
+  for (size_t i = 0; i < 4; i++) {
+    Arena::IImage* converted = Arena::ImageFactory::Convert(channels[i], PixelFormat::MONO8);
+    mono_for_stokes.push_back(converted);
+    if (!converted || converted->GetPixelFormat() != PixelFormat::MONO8) {
+      log_warn("Stokes channel " + std::to_string(i) + ": unexpected pixel format after Mono8 conversion");
+      stokes_valid = false;
+    }
+  }
+
+  if (!stokes_valid) {
+    log_warn("Skipping DOLP/AoLP computation due to unexpected pixel format");
+    return;
+  }
+
+  size_t stokes_h = mono_for_stokes[0]->GetHeight();
+  size_t stokes_w = mono_for_stokes[0]->GetWidth();
+
+  // Convert Mono8 directly to float32 for each polarization angle
+  auto to_gray_float = [&](size_t idx) -> cv::Mat {
+    cv::Mat mono(stokes_h, stokes_w, CV_8UC1,
+                 const_cast<void*>(static_cast<const void*>(mono_for_stokes[idx]->GetData())));
+    cv::Mat mono_f;
+    mono.convertTo(mono_f, CV_32F);
+    return mono_f;
+  };
+
+  cv::Mat f0   = to_gray_float(0);   // I_0°
+  cv::Mat f45  = to_gray_float(1);   // I_45°
+  cv::Mat f90  = to_gray_float(2);   // I_90°
+  cv::Mat f135 = to_gray_float(3);   // I_135°
+
+  // Stokes parameters (vectorized OpenCV operations)
+  cv::Mat S0 = f0 + f90;       // Total intensity
+  cv::Mat S1 = f0 - f90;       // Horizontal vs vertical
+  cv::Mat S2 = f45 - f135;     // Diagonal
+
+  // --- DOLP ---
+  if (publish_dolp_ && m_pub_dolp_) {
+    cv::Mat S1_sq, S2_sq, numerator, dolp_float;
+    cv::multiply(S1, S1, S1_sq);
+    cv::multiply(S2, S2, S2_sq);
+    cv::sqrt(S1_sq + S2_sq, numerator);
+
+    // Safe division: clamp S0 to avoid division by zero
+    dolp_float = cv::Mat::zeros(stokes_h, stokes_w, CV_32F);
+    cv::Mat s0_safe;
+    cv::max(S0, 1e-5f, s0_safe);
+    cv::divide(numerator, s0_safe, dolp_float);
+    dolp_float.setTo(0.0f, S0 <= 1e-5f);  // Zero where S0 is negligible
+
+    // Clamp [0, 1] and scale to uint8 [0, 255]
+    cv::min(dolp_float, 1.0f, dolp_float);
+    cv::max(dolp_float, 0.0f, dolp_float);
+
+    cv::Mat dolp_u8;
+    dolp_float.convertTo(dolp_u8, CV_8U, 255.0);
+
+    if (out_dolp) *out_dolp = dolp_u8.clone();
+
+    // Publish raw DOLP (mono8)
+    {
+      auto msg = std::make_unique<sensor_msgs::msg::Image>();
+      msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
+      msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
+      msg->header.frame_id = std::to_string(pImage->GetFrameId());
+      msg->height = stokes_h;
+      msg->width = stokes_w;
+      msg->encoding = "mono8";
+      msg->is_bigendian = 0;
+      msg->step = stokes_w;
+      msg->data.assign(dolp_u8.data, dolp_u8.data + dolp_u8.total());
+      m_pub_dolp_->publish(std::move(msg));
+    }
+
+    // Publish compressed DOLP
+    if (publish_compressed_ && m_pub_dolp_compressed_) {
+      auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+      msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
+      msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
+      msg->header.frame_id = std::to_string(pImage->GetFrameId());
+      msg->format = "jpeg";
+      std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
+      cv::imencode(".jpg", dolp_u8, msg->data, params);
+      m_pub_dolp_compressed_->publish(std::move(msg));
+    }
+  }
+
+  // --- AoLP ---
+  if (publish_aolp_ && m_pub_aolp_) {
+    // AoLP = 0.5 * atan2(S2, S1)
+    // Range: [-π/2, +π/2] → mapped to [0, 255] uint8
+    // 0 → -90°, 128 → 0°, 255 → +90°
+    size_t total_pixels = stokes_h * stokes_w;
+    cv::Mat aolp_u8(static_cast<int>(stokes_h), static_cast<int>(stokes_w), CV_8U);
+
+    const float* s1_ptr = reinterpret_cast<const float*>(S1.data);
+    const float* s2_ptr = reinterpret_cast<const float*>(S2.data);
+    uint8_t* aolp_ptr = aolp_u8.data;
+
+    constexpr float inv_pi = 0.31830988618379067154f;  // 1.0f / π
+    for (size_t i = 0; i < total_pixels; i++) {
+      float angle = 0.5f * std::atan2(s2_ptr[i], s1_ptr[i]);  // [-π/2, π/2]
+      float normalized = angle * inv_pi + 0.5f;  // [0, 1]
+      aolp_ptr[i] = static_cast<uint8_t>(
+          std::clamp(normalized * 255.0f, 0.0f, 255.0f));
+    }
+
+    if (out_aolp) *out_aolp = aolp_u8.clone();
+
+    // Publish raw AoLP (mono8)
+    {
+      auto msg = std::make_unique<sensor_msgs::msg::Image>();
+      msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
+      msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
+      msg->header.frame_id = std::to_string(pImage->GetFrameId());
+      msg->height = stokes_h;
+      msg->width = stokes_w;
+      msg->encoding = "mono8";
+      msg->is_bigendian = 0;
+      msg->step = stokes_w;
+      msg->data.assign(aolp_u8.data, aolp_u8.data + aolp_u8.total());
+      m_pub_aolp_->publish(std::move(msg));
+    }
+
+    // Publish compressed AoLP
+    if (publish_compressed_ && m_pub_aolp_compressed_) {
+      auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+      msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
+      msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
+      msg->header.frame_id = std::to_string(pImage->GetFrameId());
+      msg->format = "jpeg";
+      std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
+      cv::imencode(".jpg", aolp_u8, msg->data, params);
+      m_pub_aolp_compressed_->publish(std::move(msg));
+    }
+  }
+
+  // mono_for_stokes automatically cleaned up by RAII when going out of scope
 }
 
 void ArenaCameraNode::publish_images_()
@@ -946,6 +1145,11 @@ void ArenaCameraNode::publish_images_()
                 // bgr_channels automatically cleaned up by RAII when going out of scope
                 }  // end else (all_valid)
               }
+              
+              // Compute and publish DOLP / AoLP via shared helper
+              if ((publish_dolp_ && m_pub_dolp_) || (publish_aolp_ && m_pub_aolp_)) {
+                compute_and_publish_dolp_aolp_(pImage, channels);
+              }
             }
             
             // channels automatically cleaned up by RAII when going out of scope
@@ -1081,6 +1285,12 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
           arena_camera::ArenaImageVector channels(
               Arena::ImageFactory::SplitChannels(pImage));
           if (channels.size() == 4) {
+            // Display mat storage — filled during processing, used for tiled debug window
+            cv::Mat display_ch[4];    // 4 polarization channels (BGR)
+            cv::Mat display_max;      // max-combined (BGR)
+            cv::Mat display_dolp;     // DOLP (mono8)
+            cv::Mat display_aolp;     // AoLP (mono8)
+            
             struct ChannelInfo {
               size_t index;
               std::string name;
@@ -1098,6 +1308,12 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                   Arena::ImageFactory::Convert(channels[info.index], PFNC_BGR8));
               if (!validate_bgr8_format(bgr_image.get(), "polarization channel " + info.name)) {
                 continue;
+              }
+              // Capture for debug display window
+              if (display_images_active_ && info.index < 4) {
+                cv::Mat tmp(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3,
+                           const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
+                display_ch[info.index] = tmp.clone();
               }
               if (publish_raw_ && *info.raw_pub) {
                 auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -1151,6 +1367,8 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                 cv::max(mat0, mat1, max01);
                 cv::max(mat2, mat3, max23);
                 cv::max(max01, max23, max_combined);
+                // Capture for debug display window
+                if (display_images_active_) display_max = max_combined.clone();
                 if (publish_raw_ && m_pub_pol_max_) {
                   auto max_msg = std::make_unique<sensor_msgs::msg::Image>();
                   max_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
@@ -1177,6 +1395,150 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                   m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
                 }
               }  // end all_valid
+            }
+            
+            // Compute and publish DOLP / AoLP; capture display images if needed
+            if ((publish_dolp_ && m_pub_dolp_) || (publish_aolp_ && m_pub_aolp_)) {
+              compute_and_publish_dolp_aolp_(pImage, channels,
+                  display_images_active_ ? &display_dolp : nullptr,
+                  display_images_active_ ? &display_aolp : nullptr);
+            }
+            
+            // ==============================================================
+            // Debug display window: 4x2 tiled grid
+            // Row 1: 0°, 45°, 90°, 135°
+            // Row 2: Max, DOLP, AoLP, (blank)
+            // Press 's' to save all tiles, 'q' to close window
+            // ==============================================================
+            if (display_images_active_) {
+              try {
+                // Determine tile size from first available channel
+                int tile_w = 0, tile_h = 0;
+                for (int i = 0; i < 4; i++) {
+                  if (!display_ch[i].empty()) {
+                    tile_w = display_ch[i].cols;
+                    tile_h = display_ch[i].rows;
+                    break;
+                  }
+                }
+                
+                if (tile_w > 0 && tile_h > 0) {
+                  // Scale tiles down for display — target ~1920px wide for 4 columns
+                  int target_tile_w = 480;
+                  double scale = static_cast<double>(target_tile_w) / tile_w;
+                  int scaled_w = target_tile_w;
+                  int scaled_h = static_cast<int>(tile_h * scale);
+                  
+                  // Helper: resize a BGR or mono8 mat to BGR at display scale
+                  auto to_display_tile = [&](const cv::Mat& src, const std::string& label) -> cv::Mat {
+                    cv::Mat display;
+                    if (src.empty()) {
+                      display = cv::Mat::zeros(scaled_h, scaled_w, CV_8UC3);
+                    } else if (src.channels() == 1) {
+                      cv::Mat colored;
+                      cv::cvtColor(src, colored, cv::COLOR_GRAY2BGR);
+                      cv::resize(colored, display, cv::Size(scaled_w, scaled_h));
+                    } else {
+                      cv::resize(src, display, cv::Size(scaled_w, scaled_h));
+                    }
+                    // Add label text
+                    cv::putText(display, label, cv::Point(10, 25),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 0), 2);
+                    return display;
+                  };
+                  
+                  // Build tiles
+                  cv::Mat t0   = to_display_tile(display_ch[0], "0 deg");
+                  cv::Mat t45  = to_display_tile(display_ch[1], "45 deg");
+                  cv::Mat t90  = to_display_tile(display_ch[2], "90 deg");
+                  cv::Mat t135 = to_display_tile(display_ch[3], "135 deg");
+                  cv::Mat tmax = to_display_tile(display_max, "Max Combined");
+                  cv::Mat tdolp = to_display_tile(display_dolp, "DOLP");
+                  cv::Mat taolp = to_display_tile(display_aolp, "AoLP");
+                  cv::Mat tblank = cv::Mat::zeros(scaled_h, scaled_w, CV_8UC3);
+                  // Overlay diagnostics info on the info tile
+                  {
+                    int y = 25;
+                    const int line_h = 28;
+                    auto put_line = [&](const std::string& text, cv::Scalar color = cv::Scalar(0, 200, 200)) {
+                      cv::putText(tblank, text, cv::Point(10, y),
+                                  cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1);
+                      y += line_h;
+                    };
+                    
+                    put_line("--- Diagnostics ---", cv::Scalar(0, 255, 0));
+                    
+                    // FPS (from live counter, not cache)
+                    std::ostringstream fps_ss;
+                    fps_ss << std::fixed << std::setprecision(1) << m_calculated_fps_;
+                    put_line("FPS: " + fps_ss.str());
+                    
+                    // Look up values from diagnostics cache (O(1) map lookup)
+                    auto cache_value = [&](const std::string& key) -> std::string {
+                      auto it = m_diag_genicam_cache_.find(key);
+                      return (it != m_diag_genicam_cache_.end()) ? it->second : "N/A";
+                    };
+                    
+                    put_line("ExposureTime: " + cache_value("ExposureTime (us)") + " us");
+                    put_line("TargetBright: " + cache_value("TargetBrightness"));
+                    put_line("CalcMean: " + cache_value("CalculatedMean"));
+                    
+                    y += 10;  // spacer
+                    put_line("'s' save | 'q' quit", cv::Scalar(100, 100, 100));
+                  }
+                  
+                  // Compose 4x2 grid
+                  cv::Mat row1, row2, tiled;
+                  cv::hconcat(std::vector<cv::Mat>{t0, t45, t90, t135}, row1);
+                  cv::hconcat(std::vector<cv::Mat>{tmax, tdolp, taolp, tblank}, row2);
+                  cv::vconcat(row1, row2, tiled);
+                  
+                  cv::imshow("Polarization Debug", tiled);
+                  int key = cv::waitKey(1) & 0xFF;
+                  
+                  if (key == 'q' || key == 'Q') {
+                    display_images_active_ = false;
+                    cv::destroyAllWindows();
+                    cv::waitKey(1);  // flush the destroy event so the window actually closes
+                    log_info("Debug display window closed by user - press Ctrl+C to fully stop the node");
+                  } else if (key == 's' || key == 'S') {
+                    // Create a new session directory on each save to avoid mixing sessions
+                    auto now = std::chrono::system_clock::now();
+                    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+                    std::ostringstream oss;
+                    struct tm local_tm {};
+                    localtime_r(&time_t_now, &local_tm);
+                    oss << std::put_time(&local_tm, "%Y%m%d_%H%M%S");
+                    const char* home_env = getenv("HOME");
+                    std::string home = home_env ? home_env : "/tmp";
+                    save_session_dir_ = home + "/lucid_camera_images/session_" + oss.str();
+                    std::filesystem::create_directories(save_session_dir_);
+                    
+                    uint64_t frame_id = pImage->GetFrameId();
+                    std::string prefix = save_session_dir_ + "/frame_" + std::to_string(frame_id) + "_";
+                    
+                    // Save full-resolution images (not thumbnails)
+                    struct SavePair { const cv::Mat& mat; std::string name; };
+                    std::vector<SavePair> to_save = {
+                      {display_ch[0], "pol_0deg"}, {display_ch[1], "pol_45deg"},
+                      {display_ch[2], "pol_90deg"}, {display_ch[3], "pol_135deg"},
+                      {display_max, "pol_max"}, {display_dolp, "dolp"}, {display_aolp, "aolp"}
+                    };
+                    int saved = 0;
+                    for (const auto& sp : to_save) {
+                      if (!sp.mat.empty()) {
+                        cv::imwrite(prefix + sp.name + ".png", sp.mat);
+                        saved++;
+                      }
+                    }
+                    log_info("Saved " + std::to_string(saved) + " images to " + save_session_dir_ +
+                             " (frame " + std::to_string(frame_id) + ")");
+                  }
+                }
+              } catch (const std::exception& e) {
+                log_warn(std::string("Debug display error: ") + e.what());
+                display_images_active_ = false;
+              }
             }
           }
       }
@@ -1642,7 +2004,74 @@ void ArenaCameraNode::set_nodes_exposure_()
 {
   auto nodemap = m_pDevice->GetNodeMap();
 
-  // Set advanced exposure parameters first (before enabling auto exposure)
+  // --- Step 1: Ensure ExposureMode is "Timed" ---
+  // Other modes (e.g. TriggerWidth) make ExposureAuto read-only because
+  // exposure duration is controlled externally by the trigger signal width.
+  try {
+    GenApi::CEnumerationPtr pExposureMode = nodemap->GetNode("ExposureMode");
+    if (pExposureMode && GenApi::IsWritable(pExposureMode)) {
+      GenICam::gcstring currentMode = pExposureMode->GetCurrentEntry()->GetSymbolic();
+      if (currentMode != "Timed") {
+        log_info(std::string("\tExposureMode is '") + currentMode.c_str() +
+                 "', switching to 'Timed' to allow auto exposure control");
+        Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureMode", "Timed");
+      }
+    } else if (pExposureMode) {
+      GenICam::gcstring currentMode = pExposureMode->GetCurrentEntry()->GetSymbolic();
+      log_debug(std::string("\tExposureMode is '") + currentMode.c_str() + "' (read-only)");
+    }
+  } catch (GenICam::GenericException& e) {
+    log_debug(std::string("\tExposureMode check: ") + e.what());
+  }
+
+  // --- Step 2: Enable ExposureAuto BEFORE fine-tuning params ---
+  // Many auto-exposure sub-nodes (limits, algorithm, damping) are only
+  // writable/meaningful when ExposureAuto is "Continuous".  Setting them
+  // while ExposureAuto is "Off" can cause the camera to auto-calculate
+  // collapsed limits (e.g. upper == lower == sensor minimum).
+  bool auto_exposure_set = false;
+  if (is_passed_auto_exposure_) {
+    try {
+      GenApi::CEnumerationPtr pExposureAuto = nodemap->GetNode("ExposureAuto");
+      if (pExposureAuto && GenApi::IsWritable(pExposureAuto)) {
+        if (pExposureAuto->GetEntryByName(auto_exposure_.c_str())) {
+          Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureAuto", auto_exposure_.c_str());
+          log_info(std::string("\tExposureAuto set to ") + auto_exposure_);
+          auto_exposure_set = true;
+        } else {
+          log_warn(std::string("\tExposureAuto value '") + auto_exposure_ + "' not supported by this camera. Available values:");
+          GenApi::StringList_t entries;
+          pExposureAuto->GetSymbolics(entries);
+          for (const auto& entry : entries) {
+            log_warn(std::string("\t  - ") + entry.c_str());
+          }
+          log_warn("\tSkipping ExposureAuto setting. Other exposure parameters will still be applied.");
+        }
+      } else {
+        // Detailed diagnostic: why is the node not writable?
+        std::string reason = "ExposureAuto node not writable.";
+        try {
+          GenICam::gcstring currentVal = pExposureAuto
+              ? pExposureAuto->GetCurrentEntry()->GetSymbolic()
+              : "null";
+          reason += " Current value: " + std::string(currentVal.c_str()) + ".";
+        } catch (...) {}
+        try {
+          GenICam::gcstring mode = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "ExposureMode");
+          reason += " ExposureMode: " + std::string(mode.c_str()) + ".";
+        } catch (...) {}
+        try {
+          GenICam::gcstring trig = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode");
+          reason += " TriggerMode: " + std::string(trig.c_str()) + ".";
+        } catch (...) {}
+        log_warn(std::string("\t") + reason + " Other exposure parameters will still be applied.");
+      }
+    } catch (GenICam::GenericException& e) {
+      log_warn(std::string("\tFailed to set ExposureAuto: ") + e.what() + ". Other exposure parameters will still be applied.");
+    }
+  }
+
+  // --- Step 3: Fine-tune auto exposure parameters (now that ExposureAuto is set) ---
   if (is_passed_exposure_auto_algorithm_) {
     try {
       GenApi::CEnumerationPtr pAlgorithm = nodemap->GetNode("ExposureAutoAlgorithm");
@@ -1658,6 +2087,8 @@ void ArenaCameraNode::set_nodes_exposure_()
             log_warn(std::string("\t  - ") + entry.c_str());
           }
         }
+      } else {
+        log_warn("\tExposureAutoAlgorithm node not writable (requires ExposureAuto = Continuous)");
       }
     } catch (GenICam::GenericException& e) {
       log_warn(std::string("\tFailed to set ExposureAutoAlgorithm: ") + e.what());
@@ -1682,7 +2113,7 @@ void ArenaCameraNode::set_nodes_exposure_()
     }
   }
 
-  // Set exposure limit control
+  // Set exposure limit control (set mode before explicit limits)
   if (is_passed_exposure_auto_limit_auto_) {
     try {
       GenApi::CEnumerationPtr pLimitAuto = nodemap->GetNode("ExposureAutoLimitAuto");
@@ -1698,6 +2129,8 @@ void ArenaCameraNode::set_nodes_exposure_()
             log_warn(std::string("\t  - ") + entry.c_str());
           }
         }
+      } else {
+        log_warn("\tExposureAutoLimitAuto node not writable");
       }
     } catch (GenICam::GenericException& e) {
       log_warn(std::string("\tFailed to set ExposureAutoLimitAuto: ") + e.what());
@@ -1723,42 +2156,16 @@ void ArenaCameraNode::set_nodes_exposure_()
     }
   }
 
-  if (is_passed_auto_exposure_) {
-    try {
-      // Verify the node is writable and the value is valid
-      GenApi::CEnumerationPtr pExposureAuto = nodemap->GetNode("ExposureAuto");
-      if (pExposureAuto && GenApi::IsWritable(pExposureAuto)) {
-        // Check if the requested value is available
-        if (pExposureAuto->GetEntryByName(auto_exposure_.c_str())) {
-          Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureAuto", auto_exposure_.c_str());
-          log_info(std::string("\tExposureAuto set to ") + auto_exposure_);
-        } else {
-          log_warn(std::string("\tExposureAuto value '") + auto_exposure_ + "' not supported by this camera. Available values:");
-          GenApi::StringList_t entries;
-          pExposureAuto->GetSymbolics(entries);
-          for (const auto& entry : entries) {
-            log_warn(std::string("\t  - ") + entry.c_str());
-          }
-          log_warn("\tSkipping ExposureAuto setting.");
-          return;
-        }
-      } else {
-        log_warn("\tExposureAuto node not writable");
-        return;
-      }
-
-      if (auto_exposure_ != "Off") {
-        return;  // auto exposure enabled; skip manual exposure
-      }
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ExposureAuto: ") + e.what());
-      return;
-    }
+  // --- Step 4: If auto exposure is on, we're done (skip manual exposure) ---
+  if (auto_exposure_set && auto_exposure_ != "Off") {
+    return;
   }
 
+  // --- Step 5: Manual exposure time ---
   if (is_passed_exposure_time_) {
     if (!is_passed_auto_exposure_) {
       try {
+        // Ensure ExposureMode is Timed before disabling auto
         Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureAuto", "Off");
         log_info("\tExposureAuto set to Off");
       } catch (GenICam::GenericException& e) {
@@ -1991,12 +2398,98 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
     stat.add("Width", std::to_string(width_));
     stat.add("Height", std::to_string(height_));
     stat.add("Pixel Format", pixelformat_ros_);
-    
-    // Live GenICam register reads are DISABLED during streaming.
-    // Reading registers over GigE competes with image transport and causes
-    // TimeoutExceptions that stall the video stream and trigger the watchdog.
-    // TODO: Re-enable with a safe mechanism (e.g., only when stream is paused,
-    //       or via a dedicated control channel if the camera supports it).
-    stat.add("Camera Parameters", "disabled (live reads stall GigE stream)");
+
+    // Rate-limited GenICam register reads — only every DIAG_GENICAM_READ_INTERVAL_SEC
+    // to avoid competing with GigE Vision streaming for register access.
+    auto now_diag = std::chrono::steady_clock::now();
+    double diag_elapsed = m_diag_genicam_cache_valid_
+        ? std::chrono::duration<double>(now_diag - m_last_diag_genicam_read_time_).count()
+        : DIAG_GENICAM_READ_INTERVAL_SEC + 1.0;  // force first read
+
+    if (diag_elapsed >= DIAG_GENICAM_READ_INTERVAL_SEC) {
+      m_diag_genicam_cache_.clear();
+      try {
+        auto nodemap = m_pDevice->GetNodeMap();
+
+        // Helper: attempt a read, cache on success, silently skip on failure
+        auto try_read = [&](const char* diag_key, auto reader) {
+          try { m_diag_genicam_cache_[diag_key] = reader(nodemap); } catch (...) {}
+        };
+
+        // Frame rate
+        try_read("AcquisitionFrameRateEnable", [](auto nm) {
+          return Arena::GetNodeValue<bool>(nm, "AcquisitionFrameRateEnable") ? "true" : "false";
+        });
+        try_read("AcquisitionFrameRate (FPS)", [](auto nm) {
+          bool en = Arena::GetNodeValue<bool>(nm, "AcquisitionFrameRateEnable");
+          if (en) return std::to_string(Arena::GetNodeValue<double>(nm, "AcquisitionFrameRate"));
+          return std::string("disabled (max)");
+        });
+
+        // Gain
+        try_read("Gain (dB)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "Gain")); });
+        try_read("GainRaw", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "GainRaw")); });
+        try_read("GainAuto", [](auto nm) {
+          GenICam::gcstring v = Arena::GetNodeValue<GenICam::gcstring>(nm, "GainAuto"); return std::string(v.c_str());
+        });
+
+        // Exposure
+        try_read("ExposureTime (us)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "ExposureTime")); });
+        try_read("ExposureTimeRaw", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "ExposureTimeRaw")); });
+        try_read("ExposureAuto", [](auto nm) {
+          GenICam::gcstring v = Arena::GetNodeValue<GenICam::gcstring>(nm, "ExposureAuto"); return std::string(v.c_str());
+        });
+        // Image statistics (next to exposure for easy comparison)
+        try_read("TargetBrightness", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "TargetBrightness")); });
+        try_read("CalculatedMean", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "CalculatedMean")); });
+        try_read("CalculatedMedian", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "CalculatedMedian")); });
+
+        // Auto exposure details (optional nodes)
+        try_read("ExposureAutoUpperLimit (us)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "ExposureAutoUpperLimit")); });
+        try_read("ExposureAutoLowerLimit (us)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "ExposureAutoLowerLimit")); });
+        try_read("ExposureAutoLimitAuto", [](auto nm) {
+          GenICam::gcstring v = Arena::GetNodeValue<GenICam::gcstring>(nm, "ExposureAutoLimitAuto"); return std::string(v.c_str());
+        });
+        try_read("ExposureAutoAlgorithm", [](auto nm) {
+          GenICam::gcstring v = Arena::GetNodeValue<GenICam::gcstring>(nm, "ExposureAutoAlgorithm"); return std::string(v.c_str());
+        });
+        try_read("ExposureAutoDamping", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "ExposureAutoDamping")); });
+
+        // Misc
+        try_read("ShortExposureEnable", [](auto nm) {
+          return Arena::GetNodeValue<bool>(nm, "ShortExposureEnable") ? "true" : "false";
+        });
+        try_read("DevicePower (W)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "DevicePower")); });
+        try_read("DeviceUpTime (ms)", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "DeviceUpTime")); });
+        try_read("LinkUpTime (ms)", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "LinkUpTime")); });
+        try_read("DeviceTemperature (C)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "DeviceTemperature")); });
+
+        m_last_diag_genicam_read_time_ = now_diag;
+        m_diag_genicam_cache_valid_ = true;
+
+      } catch (GenICam::GenericException& e) {
+        m_diag_genicam_cache_["Camera Parameters"] = std::string("GenICam error: ") + e.what();
+        m_diag_genicam_cache_valid_ = true;
+        m_last_diag_genicam_read_time_ = now_diag;
+      } catch (const std::exception& e) {
+        m_diag_genicam_cache_["Camera Parameters"] = std::string("error: ") + e.what();
+        m_diag_genicam_cache_valid_ = true;
+        m_last_diag_genicam_read_time_ = now_diag;
+      } catch (...) {
+        m_diag_genicam_cache_["Camera Parameters"] = "unknown error reading camera parameters";
+        m_diag_genicam_cache_valid_ = true;
+        m_last_diag_genicam_read_time_ = now_diag;
+      }
+    }
+
+    // Report cached values
+    for (const auto& kv : m_diag_genicam_cache_) {
+      stat.add(kv.first, kv.second);
+    }
+    if (m_diag_genicam_cache_valid_) {
+      stat.add("Diag GenICam Age (sec)", std::to_string(
+          std::chrono::duration<double>(
+              std::chrono::steady_clock::now() - m_last_diag_genicam_read_time_).count()));
+    }
   }
 }
