@@ -1638,8 +1638,11 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                       auto now = std::chrono::system_clock::now();
                       auto time_t_now = std::chrono::system_clock::to_time_t(now);
                       std::ostringstream oss;
-                      oss << std::put_time(std::localtime(&time_t_now), "%Y%m%d_%H%M%S");
-                      std::string home = getenv("HOME") ? getenv("HOME") : "/tmp";
+                      struct tm local_tm {};
+                      localtime_r(&time_t_now, &local_tm);
+                      oss << std::put_time(&local_tm, "%Y%m%d_%H%M%S");
+                      const char* home_env = getenv("HOME");
+                      std::string home = home_env ? home_env : "/tmp";
                       save_session_dir_ = home + "/lucid_camera_images/session_" + oss.str();
                     }
                     std::filesystem::create_directories(save_session_dir_);
