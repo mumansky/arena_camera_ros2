@@ -49,6 +49,9 @@
 #include <fstream>    // file I/O
 #include <vector>     // vector
 #include <cstdlib>    // getenv
+#include <filesystem> // directory creation for image saving
+#include <iomanip>    // put_time for session directory naming
+#include <sstream>    // ostringstream for diagnostics overlay
 #include <yaml-cpp/yaml.h>  // YAML parsing
 
 // OpenCV
@@ -416,6 +419,10 @@ void ArenaCameraNode::parse_parameters_()
 
     currentParam = "publish_aolp";
     publish_aolp_ = config_bool(m_config_params_, "publish_aolp", false);
+
+    currentParam = "display_images";
+    display_images_ = config_bool(m_config_params_, "display_images", false);
+    display_images_active_ = display_images_;
 
     currentParam = "jpeg_quality";
     jpeg_quality_ = config_int(m_config_params_, "jpeg_quality", 80);
@@ -1261,6 +1268,12 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
           arena_camera::ArenaImageVector channels(
               Arena::ImageFactory::SplitChannels(pImage));
           if (channels.size() == 4) {
+            // Display mat storage — filled during processing, used for tiled debug window
+            cv::Mat display_ch[4];    // 4 polarization channels (BGR)
+            cv::Mat display_max;      // max-combined (BGR)
+            cv::Mat display_dolp;     // DOLP (mono8)
+            cv::Mat display_aolp;     // AoLP (mono8)
+            
             struct ChannelInfo {
               size_t index;
               std::string name;
@@ -1278,6 +1291,12 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                   Arena::ImageFactory::Convert(channels[info.index], PFNC_BGR8));
               if (!validate_bgr8_format(bgr_image.get(), "polarization channel " + info.name)) {
                 continue;
+              }
+              // Capture for debug display window
+              if (display_images_active_ && info.index < 4) {
+                cv::Mat tmp(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3,
+                           const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
+                display_ch[info.index] = tmp.clone();
               }
               if (publish_raw_ && *info.raw_pub) {
                 auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -1331,6 +1350,8 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                 cv::max(mat0, mat1, max01);
                 cv::max(mat2, mat3, max23);
                 cv::max(max01, max23, max_combined);
+                // Capture for debug display window
+                if (display_images_active_) display_max = max_combined.clone();
                 if (publish_raw_ && m_pub_pol_max_) {
                   auto max_msg = std::make_unique<sensor_msgs::msg::Image>();
                   max_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
@@ -1430,6 +1451,9 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                 cv::Mat dolp_u8;
                 dolp_float.convertTo(dolp_u8, CV_8U, 255.0);
                 
+                // Capture for debug display window
+                if (display_images_active_) display_dolp = dolp_u8.clone();
+                
                 // Publish raw DOLP (mono8)
                 {
                   auto msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -1475,6 +1499,9 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                       std::clamp(normalized * 255.0f, 0.0f, 255.0f));
                 }
                 
+                // Capture for debug display window
+                if (display_images_active_) display_aolp = aolp_u8.clone();
+                
                 // Publish raw AoLP (mono8)
                 {
                   auto msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -1504,6 +1531,144 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
               }
               
               }  // end else (stokes_valid)
+            }
+            
+            // ==============================================================
+            // Debug display window: 4x2 tiled grid
+            // Row 1: 0°, 45°, 90°, 135°
+            // Row 2: Max, DOLP, AoLP, (blank)
+            // Press 's' to save all tiles, 'q' to close window
+            // ==============================================================
+            if (display_images_active_) {
+              try {
+                // Determine tile size from first available channel
+                int tile_w = 0, tile_h = 0;
+                for (int i = 0; i < 4; i++) {
+                  if (!display_ch[i].empty()) {
+                    tile_w = display_ch[i].cols;
+                    tile_h = display_ch[i].rows;
+                    break;
+                  }
+                }
+                
+                if (tile_w > 0 && tile_h > 0) {
+                  // Scale tiles down for display — target ~1920px wide for 4 columns
+                  int target_tile_w = 480;
+                  double scale = static_cast<double>(target_tile_w) / tile_w;
+                  int scaled_w = target_tile_w;
+                  int scaled_h = static_cast<int>(tile_h * scale);
+                  
+                  // Helper: resize a BGR or mono8 mat to BGR at display scale
+                  auto to_display_tile = [&](const cv::Mat& src, const std::string& label) -> cv::Mat {
+                    cv::Mat display;
+                    if (src.empty()) {
+                      display = cv::Mat::zeros(scaled_h, scaled_w, CV_8UC3);
+                    } else if (src.channels() == 1) {
+                      cv::Mat colored;
+                      cv::cvtColor(src, colored, cv::COLOR_GRAY2BGR);
+                      cv::resize(colored, display, cv::Size(scaled_w, scaled_h));
+                    } else {
+                      cv::resize(src, display, cv::Size(scaled_w, scaled_h));
+                    }
+                    // Add label text
+                    cv::putText(display, label, cv::Point(10, 25),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 0), 2);
+                    return display;
+                  };
+                  
+                  // Build tiles
+                  cv::Mat t0   = to_display_tile(display_ch[0], "0 deg");
+                  cv::Mat t45  = to_display_tile(display_ch[1], "45 deg");
+                  cv::Mat t90  = to_display_tile(display_ch[2], "90 deg");
+                  cv::Mat t135 = to_display_tile(display_ch[3], "135 deg");
+                  cv::Mat tmax = to_display_tile(display_max, "Max Combined");
+                  cv::Mat tdolp = to_display_tile(display_dolp, "DOLP");
+                  cv::Mat taolp = to_display_tile(display_aolp, "AoLP");
+                  cv::Mat tblank = cv::Mat::zeros(scaled_h, scaled_w, CV_8UC3);
+                  // Overlay diagnostics info on the info tile
+                  {
+                    int y = 25;
+                    const int line_h = 28;
+                    auto put_line = [&](const std::string& text, cv::Scalar color = cv::Scalar(0, 200, 200)) {
+                      cv::putText(tblank, text, cv::Point(10, y),
+                                  cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1);
+                      y += line_h;
+                    };
+                    
+                    put_line("--- Diagnostics ---", cv::Scalar(0, 255, 0));
+                    
+                    // FPS (from live counter, not cache)
+                    std::ostringstream fps_ss;
+                    fps_ss << std::fixed << std::setprecision(1) << m_calculated_fps_;
+                    put_line("FPS: " + fps_ss.str());
+                    
+                    // Look up values from diagnostics cache
+                    auto cache_value = [&](const std::string& key) -> std::string {
+                      for (const auto& kv : m_diag_genicam_cache_) {
+                        if (kv.first == key) return kv.second;
+                      }
+                      return "N/A";
+                    };
+                    
+                    put_line("ExposureTime: " + cache_value("ExposureTime (us)") + " us");
+                    put_line("TargetBright: " + cache_value("TargetBrightness"));
+                    put_line("CalcMean: " + cache_value("CalculatedMean"));
+                    
+                    y += 10;  // spacer
+                    put_line("'s' save | 'q' quit", cv::Scalar(100, 100, 100));
+                  }
+                  
+                  // Compose 4x2 grid
+                  cv::Mat row1, row2, tiled;
+                  cv::hconcat(std::vector<cv::Mat>{t0, t45, t90, t135}, row1);
+                  cv::hconcat(std::vector<cv::Mat>{tmax, tdolp, taolp, tblank}, row2);
+                  cv::vconcat(row1, row2, tiled);
+                  
+                  cv::imshow("Polarization Debug", tiled);
+                  int key = cv::waitKey(1) & 0xFF;
+                  
+                  if (key == 'q' || key == 'Q') {
+                    display_images_active_ = false;
+                    cv::destroyAllWindows();
+                    cv::waitKey(1);  // flush the destroy event so the window actually closes
+                    log_info("Debug display window closed by user - press Ctrl+C to fully stop the node");
+                  } else if (key == 's' || key == 'S') {
+                    // Create session directory on first save
+                    if (save_session_dir_.empty()) {
+                      auto now = std::chrono::system_clock::now();
+                      auto time_t_now = std::chrono::system_clock::to_time_t(now);
+                      std::ostringstream oss;
+                      oss << std::put_time(std::localtime(&time_t_now), "%Y%m%d_%H%M%S");
+                      std::string home = getenv("HOME") ? getenv("HOME") : "/tmp";
+                      save_session_dir_ = home + "/lucid_camera_images/session_" + oss.str();
+                    }
+                    std::filesystem::create_directories(save_session_dir_);
+                    
+                    uint64_t frame_id = pImage->GetFrameId();
+                    std::string prefix = save_session_dir_ + "/frame_" + std::to_string(frame_id) + "_";
+                    
+                    // Save full-resolution images (not thumbnails)
+                    struct SavePair { const cv::Mat& mat; std::string name; };
+                    std::vector<SavePair> to_save = {
+                      {display_ch[0], "pol_0deg"}, {display_ch[1], "pol_45deg"},
+                      {display_ch[2], "pol_90deg"}, {display_ch[3], "pol_135deg"},
+                      {display_max, "pol_max"}, {display_dolp, "dolp"}, {display_aolp, "aolp"}
+                    };
+                    int saved = 0;
+                    for (const auto& sp : to_save) {
+                      if (!sp.mat.empty()) {
+                        cv::imwrite(prefix + sp.name + ".png", sp.mat);
+                        saved++;
+                      }
+                    }
+                    log_info("Saved " + std::to_string(saved) + " images to " + save_session_dir_ +
+                             " (frame " + std::to_string(frame_id) + ")");
+                  }
+                }
+              } catch (const std::exception& e) {
+                log_warn(std::string("Debug display error: ") + e.what());
+                display_images_active_ = false;
+              }
             }
           }
       }

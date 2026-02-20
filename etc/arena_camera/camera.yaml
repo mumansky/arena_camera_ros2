@@ -131,6 +131,13 @@
     # Computed from Stokes parameters: AoLP = 0.5 * atan2(S2, S1)
     publish_aolp: true
     
+    # Debug Display Window
+    # --------------------
+    # Show a tiled OpenCV window with all polarization channels, max-combined,
+    # DOLP, and AoLP images. Press 's' to save all tiles as PNGs, 'q' to close.
+    # Only works when running with a display (not headless/Docker).
+    display_images: true
+    
     # JPEG Compression Quality
     # ------------------------
     # Quality setting for JPEG compression (1-100)

@@ -313,6 +313,11 @@ class ArenaCameraNode : public rclcpp::Node
   bool publish_dolp_;
   bool publish_aolp_;
   
+  // Debug display window (OpenCV imshow)
+  bool display_images_;       // Config: show tiled debug window
+  bool display_images_active_; // Runtime: toggled off by 'q' keypress
+  std::string save_session_dir_;  // Created on first 's' keypress
+  
   int jpeg_quality_;  // JPEG compression quality (1-100, default 80)
   
   // Watchdog settings (Task 20)
