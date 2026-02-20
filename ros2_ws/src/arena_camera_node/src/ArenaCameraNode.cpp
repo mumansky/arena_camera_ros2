@@ -1093,7 +1093,7 @@ void ArenaCameraNode::publish_images_()
                   const float* s2_ptr = reinterpret_cast<const float*>(S2.data);
                   uint8_t* aolp_ptr = aolp_u8.data;
                   
-                  constexpr float inv_pi = 1.0f / static_cast<float>(M_PI);
+                  constexpr float inv_pi = 0.31830988618379067154f;  // 1.0f / π
                   for (size_t i = 0; i < total_pixels; i++) {
                     float angle = 0.5f * std::atan2(s2_ptr[i], s1_ptr[i]);  // [-π/2, π/2]
                     // Map [-π/2, π/2] → [0, 1] → [0, 255]
