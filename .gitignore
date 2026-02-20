@@ -12,3 +12,4 @@ _codeql_detected_source_root
 *.tar.gz
 *.whl
 .vscode
+persist.json

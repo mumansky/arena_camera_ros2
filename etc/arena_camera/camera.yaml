@@ -122,6 +122,15 @@
     # Compressed images are published to <topic>/compressed
     # For polarized cameras, applies to both main topic and /pol_0deg channel
     
+    # Polarization Analysis Topics (polarized cameras only)
+    # ---------------------------------------------------
+    # Degree of Linear Polarization (DOLP): mono8 image where 0=unpolarized, 255=fully polarized
+    # Computed from Stokes parameters: DOLP = sqrt(S1² + S2²) / S0
+    publish_dolp: true
+    # Angle of Linear Polarization (AoLP): mono8 image mapping [-90°,+90°] to [0,255]
+    # Computed from Stokes parameters: AoLP = 0.5 * atan2(S2, S1)
+    publish_aolp: true
+    
     # JPEG Compression Quality
     # ------------------------
     # Quality setting for JPEG compression (1-100)
