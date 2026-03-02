@@ -37,8 +37,7 @@
  *   2. Trigger mode: Waits for service calls via the trigger_image service.
  *      Uses blocking GetImage() in publish_an_image_on_trigger_().
  *
- * The legacy blocking publish_images_() loop is retained but not used in the
- * current callback-based architecture.
+ * Trigger mode uses blocking GetImage() in publish_an_image_on_trigger_().
  */
 
 #include <cstring>    // memcpy
@@ -99,20 +98,6 @@ namespace PixelFormat {
  */
 inline bool is_polarized_format(uint64_t format) {
   return format == PixelFormat::PFNC_POLARIZED_BAYER_RG8;
-}
-
-/**
- * @brief Check if the given pixel format is supported by this node
- * @param format PFNC pixel format value from Arena SDK
- * @return true if the format is supported, false otherwise
- */
-inline bool is_supported_format(uint64_t format) {
-  // Currently we support:
-  // 1. Polarized format for PHX050S1-QC cameras
-  // 2. Any format that can be converted to BGR8 (handled by Arena SDK Convert)
-  // If format is polarized, we handle it specially
-  // Otherwise, we attempt conversion to BGR8
-  return true;  // We attempt to handle all formats via conversion
 }
 
 /**
@@ -326,6 +311,12 @@ void ArenaCameraNode::parse_parameters_()
     topic_ = config_string(m_config_params_, "topic", "/arena_camera_node/images");
     is_passed_topic_ = topic_ != "/arena_camera_node/images";
 
+    currentParam = "frame_id";
+    frame_id_ = config_string(m_config_params_, "frame_id", "camera_optical_frame");
+
+    currentParam = "use_camera_timestamp";
+    use_camera_timestamp_ = config_bool(m_config_params_, "use_camera_timestamp", false);
+
     currentParam = "serial";
     serial_ = config_string(m_config_params_, "serial", "");
     is_passed_serial_ = !serial_.empty();
@@ -360,7 +351,7 @@ void ArenaCameraNode::parse_parameters_()
 
     currentParam = "short_exposure_enable";
     short_exposure_enable_ = config_bool(m_config_params_, "short_exposure_enable", false);
-    is_passed_short_exposure_enable_ = short_exposure_enable_;
+    is_passed_short_exposure_enable_ = config_has(m_config_params_, "short_exposure_enable");
 
     currentParam = "exposure_auto_algorithm";
     exposure_auto_algorithm_ = config_string(m_config_params_, "exposure_auto_algorithm", "");
@@ -396,6 +387,9 @@ void ArenaCameraNode::parse_parameters_()
 
     currentParam = "trigger_mode";
     trigger_mode_activated_ = config_bool(m_config_params_, "trigger_mode", false);
+
+    currentParam = "stream_buffer_count";
+    stream_buffer_count_ = config_int(m_config_params_, "stream_buffer_count", 10);
 
     // QoS settings
     currentParam = "qos_history";
@@ -456,17 +450,15 @@ void ArenaCameraNode::initialize_()
   // ARENASDK ---------------------------------------------------------------
   // Use no-op deleters since cleanup is handled explicitly in the destructor
   // to avoid accessing 'this' after partial destruction
-  m_pSystem =
-      std::shared_ptr<Arena::ISystem>(nullptr, [](Arena::ISystem*) {
-        // No-op: cleanup handled in destructor
-      });
-  m_pSystem.reset(Arena::OpenSystem());
+  // shared_ptr with no-op deleter: CloseSystem() is called explicitly in the
+  // destructor, so the shared_ptr must never call delete on the raw pointer.
+  // Using shared_ptr(ptr, deleter) preserves the no-op through the lifetime;
+  // reset(ptr) would silently replace it with the default (delete) deleter.
+  m_pSystem = std::shared_ptr<Arena::ISystem>(
+      Arena::OpenSystem(), [](Arena::ISystem*) { /* no-op */ });
 
-  // No-op deleter for device - cleanup handled in destructor
-  m_pDevice =
-      std::shared_ptr<Arena::IDevice>(nullptr, [](Arena::IDevice*) {
-        // No-op: cleanup handled in destructor
-      });
+  // m_pDevice is default-initialized (null). The no-op deleter is applied in
+  // run_() when the device is created, so DestroyDevice() handles cleanup.
 
   //
   // CHECK DEVICE CONNECTION ( timer ) --------------------------------------
@@ -485,6 +477,10 @@ void ArenaCameraNode::initialize_()
   m_trigger_an_image_srv_ = this->create_service<std_srvs::srv::Trigger>(
       std::string(this->get_name()) + "/trigger_image",
       std::bind(&ArenaCameraNode::publish_an_image_on_trigger_, this, _1, _2));
+
+  this->declare_parameter("target_brightness", target_brightness_);
+  m_param_callback_handle_ = this->add_on_set_parameters_callback(
+      std::bind(&ArenaCameraNode::on_set_parameters_, this, _1));
 
   //
   // Publisher --------------------------------------------------------------
@@ -513,12 +509,7 @@ void ArenaCameraNode::initialize_()
       pub_qos_.history(
           K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY[pub_qos_history_]);
     } else {
-      log_err(pub_qos_history_ + " is not supported for this node");
-      // TODO
-      // should thorow instead??
-      // should this keeps shutting down if for some reasons this node is kept
-      // alive
-      throw;
+      throw std::invalid_argument("Unsupported QoS history policy: " + pub_qos_history_);
     }
   }
   // QoS depth
@@ -536,8 +527,7 @@ void ArenaCameraNode::initialize_()
       pub_qos_.reliability(
           K_CMDLN_PARAMETER_TO_QOS_RELIABILITY_POLICY[pub_qos_reliability_]);
     } else {
-      log_err(pub_qos_reliability_ + " is not supported for this node");
-      throw;
+      throw std::invalid_argument("Unsupported QoS reliability policy: " + pub_qos_reliability_);
     }
   }
 
@@ -666,7 +656,8 @@ void ArenaCameraNode::wait_for_device_timer_callback_()
 void ArenaCameraNode::run_()
 {
   auto device = create_device_ros_();
-  m_pDevice.reset(device);
+  // Preserve no-op deleter: DestroyDevice() is called explicitly in destructor.
+  m_pDevice = std::shared_ptr<Arena::IDevice>(device, [](Arena::IDevice*) { /* no-op */ });
   set_nodes_();
   log_debug("set_nodes_() completed, starting stream...");
 
@@ -676,11 +667,28 @@ void ArenaCameraNode::run_()
   // stream stalls at high rates.  A native PCIe NIC with jumbo frames (9000) is
   // strongly recommended for production use.
   try {
-    // Walk /sys/class/net/*/address looking for the interface whose route
-    // covers the camera subnet.  Lightweight — no privileges needed.
+    // Get the camera's IP address from its GenICam node so the route lookup
+    // works on any subnet, not just a hardcoded IP.
+    std::string cam_ip_str;
+    try {
+      auto nodemap = m_pDevice->GetNodeMap();
+      // GevCurrentIPAddress is a 32-bit integer encoded as dotted-decimal
+      int64_t ip_int = Arena::GetNodeValue<int64_t>(nodemap, "GevCurrentIPAddress");
+      cam_ip_str =
+          std::to_string((ip_int >> 24) & 0xFF) + "." +
+          std::to_string((ip_int >> 16) & 0xFF) + "." +
+          std::to_string((ip_int >>  8) & 0xFF) + "." +
+          std::to_string( ip_int        & 0xFF);
+    } catch (...) {
+      // Non-GigE camera or node unavailable — skip MTU check
+    }
+
+    if (!cam_ip_str.empty()) {
+    // Walk the routing table to find which interface reaches the camera.
     std::string cam_iface;
     int cam_mtu = 0;
-    FILE* fp = popen("ip -o route get 172.24.0.30 2>/dev/null | awk '{print $3}'", "r");
+    std::string route_cmd = "ip -o route get " + cam_ip_str + " 2>/dev/null | awk '{print $3}'";
+    FILE* fp = popen(route_cmd.c_str(), "r");
     if (fp) {
       char buf[128]{};
       if (fgets(buf, sizeof(buf), fp)) {
@@ -707,6 +715,7 @@ void ArenaCameraNode::run_()
       log_info("GigE health: interface '" + cam_iface + "' MTU " +
                std::to_string(cam_mtu) + " — jumbo frames OK");
     }
+    }  // end if (!cam_ip_str.empty())
   } catch (...) {
     // Non-critical — don't let a health check prevent streaming
   }
@@ -717,7 +726,7 @@ void ArenaCameraNode::run_()
   constexpr int STREAM_RETRY_DELAY_MS = 2000;
   for (int attempt = 1; attempt <= MAX_STREAM_START_ATTEMPTS; ++attempt) {
     try {
-      m_pDevice->StartStream();
+      m_pDevice->StartStream(stream_buffer_count_);
       m_is_streaming_.store(true);
       log_debug("StartStream() completed");
       break;  // success
@@ -839,9 +848,7 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
     // Publish raw DOLP (mono8)
     {
       auto msg = std::make_unique<sensor_msgs::msg::Image>();
-      msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-      msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-      msg->header.frame_id = std::to_string(pImage->GetFrameId());
+      fill_header_(msg->header, pImage);
       msg->height = stokes_h;
       msg->width = stokes_w;
       msg->encoding = "mono8";
@@ -854,9 +861,7 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
     // Publish compressed DOLP
     if (publish_compressed_ && m_pub_dolp_compressed_) {
       auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-      msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-      msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-      msg->header.frame_id = std::to_string(pImage->GetFrameId());
+      fill_header_(msg->header, pImage);
       msg->format = "jpeg";
       std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
       cv::imencode(".jpg", dolp_u8, msg->data, params);
@@ -889,9 +894,7 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
     // Publish raw AoLP (mono8)
     {
       auto msg = std::make_unique<sensor_msgs::msg::Image>();
-      msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-      msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-      msg->header.frame_id = std::to_string(pImage->GetFrameId());
+      fill_header_(msg->header, pImage);
       msg->height = stokes_h;
       msg->width = stokes_w;
       msg->encoding = "mono8";
@@ -904,9 +907,7 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
     // Publish compressed AoLP
     if (publish_compressed_ && m_pub_aolp_compressed_) {
       auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-      msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-      msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-      msg->header.frame_id = std::to_string(pImage->GetFrameId());
+      fill_header_(msg->header, pImage);
       msg->format = "jpeg";
       std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
       cv::imencode(".jpg", aolp_u8, msg->data, params);
@@ -917,267 +918,6 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
   // mono_for_stokes automatically cleaned up by RAII when going out of scope
 }
 
-void ArenaCameraNode::publish_images_()
-{
-  Arena::IImage* pImage = nullptr;
-  auto last_diagnostics_update = std::chrono::steady_clock::now();
-  const auto diagnostics_update_interval = std::chrono::seconds(1);
-
-  log_info("Streaming started - publishing images to " + topic_);
-
-  while (rclcpp::ok()) {
-    try {
-      pImage = m_pDevice->GetImage(1000);
-      
-      // Publish raw image if enabled
-      if (publish_raw_ && m_pub_) {
-        auto p_image_msg = std::make_unique<sensor_msgs::msg::Image>();
-        msg_form_image_(pImage, *p_image_msg);
-        m_pub_->publish(std::move(p_image_msg));
-      }
-      
-      // Publish compressed image if enabled
-      if (publish_compressed_ && m_pub_compressed_) {
-        uint64_t pixel_format = pImage->GetPixelFormat();
-        
-        // Skip compression for polarized formats on main topic
-        // (compressed polarized data is available on pol_0deg/compressed topic)
-        if (!is_polarized_format(pixel_format)) {
-          auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-          compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-          compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-          compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-          compressed_msg->format = "jpeg";
-          
-          // Use RAII for converted image to ensure cleanup on exception
-          arena_camera::ArenaImagePtr converted_image;
-          Arena::IImage* image_to_compress = nullptr;
-          
-          // Try to convert to BGR8 for compression compatibility
-          try {
-            converted_image = arena_camera::make_arena_image_ptr(
-                Arena::ImageFactory::Convert(pImage, PFNC_BGR8));
-            image_to_compress = converted_image.get();
-          } catch (...) {
-            // If conversion fails, try the original format
-            // This handles cases where the image is already in a JPEG-compatible format
-            image_to_compress = pImage;
-          }
-          
-          // Create cv::Mat and compress
-          int cvType = CV_8UC3;
-          if (image_to_compress->GetBitsPerPixel() == 8) {
-            cvType = CV_8UC1;
-          }
-          
-          cv::Mat img_mat(image_to_compress->GetHeight(), 
-                         image_to_compress->GetWidth(), 
-                         cvType,
-                         const_cast<void*>(static_cast<const void*>(image_to_compress->GetData())));
-          
-          std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-          cv::imencode(".jpg", img_mat, compressed_msg->data, params);
-          
-          // converted_image is automatically destroyed by RAII when going out of scope
-          
-          m_pub_compressed_->publish(std::move(compressed_msg));
-        }
-      }
-      
-      m_images_published_++;
-      
-      // Update FPS calculation
-      m_fps_frame_count_++;
-      auto now = std::chrono::steady_clock::now();
-      if (m_fps_frame_count_ == 1) {
-        m_fps_last_time_ = now;
-      } else {
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_fps_last_time_).count();
-        if (elapsed >= 1000) {  // Update FPS every second
-          m_calculated_fps_ = (m_fps_frame_count_ * 1000.0) / elapsed;
-          m_fps_frame_count_ = 0;
-          m_fps_last_time_ = now;
-        }
-      }
-
-      log_debug(std::string("image ") + std::to_string(pImage->GetFrameId()) +
-               " published to " + topic_);
-      
-      // Extract and publish all polarization channels if format is polarized
-      try {
-        uint64_t pixel_format = pImage->GetPixelFormat();
-        // Check if this is a polarized format
-        if (is_polarized_format(pixel_format)) {
-            // Use Arena SDK to split channels - wrap in RAII for exception safety
-            arena_camera::ArenaImageVector channels(
-                Arena::ImageFactory::SplitChannels(pImage));
-            
-            if (channels.size() == 4) {
-              // Define channel info: index, name, publisher, compressed_publisher
-              struct ChannelInfo {
-                size_t index;
-                std::string name;
-                rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr* raw_pub;
-                rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr* compressed_pub;
-              };
-              
-              std::vector<ChannelInfo> channel_infos = {
-                {0, "0deg", &m_pub_pol_0deg_, &m_pub_pol_0deg_compressed_},
-                {1, "45deg", &m_pub_pol_45deg_, &m_pub_pol_45deg_compressed_},
-                {2, "90deg", &m_pub_pol_90deg_, &m_pub_pol_90deg_compressed_},
-                {3, "135deg", &m_pub_pol_135deg_, &m_pub_pol_135deg_compressed_}
-              };
-              
-              // Process each channel - use RAII for converted BGR images
-              for (const auto& info : channel_infos) {
-                // Convert channel from BayerRG8 to BGR8 with RAII wrapper
-                arena_camera::ArenaImagePtr bgr_image(
-                    Arena::ImageFactory::Convert(channels[info.index], PFNC_BGR8));
-                
-                // Validate that conversion actually produced BGR8 format
-                if (!validate_bgr8_format(bgr_image.get(), "polarization channel " + info.name)) {
-                  continue;  // Skip this channel if format is unexpected
-                }
-                
-                // Publish raw polarization channel if enabled
-                if (publish_raw_ && *info.raw_pub) {
-                  auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
-                  pol_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                  pol_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                  pol_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                  pol_msg->height = bgr_image->GetHeight();
-                  pol_msg->width = bgr_image->GetWidth();
-                  pol_msg->encoding = "bgr8";
-                  pol_msg->is_bigendian = 0;
-                  pol_msg->step = pol_msg->width * 3;
-                  
-                  size_t data_size = bgr_image->GetHeight() * bgr_image->GetWidth() * 3;
-                  pol_msg->data.resize(data_size);
-                  std::memcpy(&pol_msg->data[0], bgr_image->GetData(), data_size);
-                  
-                  (*info.raw_pub)->publish(std::move(pol_msg));
-                }
-                
-                // Publish compressed polarization channel if enabled
-                if (publish_compressed_ && *info.compressed_pub) {
-                  auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-                  compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                  compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                  compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                  compressed_msg->format = "jpeg";
-                  
-                  // Convert to cv::Mat and compress with JPEG
-                  cv::Mat bgr_mat(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3, 
-                                 const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
-                  std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-                  cv::imencode(".jpg", bgr_mat, compressed_msg->data, params);
-                  
-                  (*info.compressed_pub)->publish(std::move(compressed_msg));
-                }
-                
-                // bgr_image is automatically destroyed by RAII when going out of scope
-              }
-              
-              // Create max-combined image from all 4 polarization channels
-              if ((publish_raw_ && m_pub_pol_max_) || (publish_compressed_ && m_pub_pol_max_compressed_)) {
-                // Convert all channels to BGR8 first - use RAII wrapper for exception safety
-                arena_camera::ArenaImageVector bgr_channels;
-                bool all_valid = true;
-                for (size_t i = 0; i < 4; i++) {
-                  Arena::IImage* converted = Arena::ImageFactory::Convert(channels[i], PFNC_BGR8);
-                  bgr_channels.push_back(converted);
-                  if (!validate_bgr8_format(converted, "max-combined channel " + std::to_string(i))) {
-                    all_valid = false;
-                  }
-                }
-                
-                if (!all_valid) {
-                  log_warn("Skipping max-combined image due to unexpected pixel format after conversion");
-                } else {
-                
-                // Get dimensions from first channel
-                size_t height = bgr_channels[0]->GetHeight();
-                size_t width = bgr_channels[0]->GetWidth();
-                
-                // Create cv::Mat wrappers for all channels (no data copy)
-                cv::Mat mat0(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[0]->GetData())));
-                cv::Mat mat1(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[1]->GetData())));
-                cv::Mat mat2(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[2]->GetData())));
-                cv::Mat mat3(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[3]->GetData())));
-                
-                // Combine using vectorized OpenCV operations (like NumPy)
-                cv::Mat temp1, temp2, max_mat;
-                cv::max(mat0, mat1, temp1);
-                cv::max(mat2, mat3, temp2);
-                cv::max(temp1, temp2, max_mat);
-                
-                // Publish raw max-combined image
-                if (publish_raw_ && m_pub_pol_max_) {
-                  auto max_msg = std::make_unique<sensor_msgs::msg::Image>();
-                  max_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                  max_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                  max_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                  max_msg->height = height;
-                  max_msg->width = width;
-                  max_msg->encoding = "bgr8";
-                  max_msg->is_bigendian = 0;
-                  max_msg->step = width * 3;
-                  max_msg->data.assign(max_mat.data, max_mat.data + max_mat.total() * max_mat.elemSize());
-                  
-                  m_pub_pol_max_->publish(std::move(max_msg));
-                }
-                
-                // Publish compressed max-combined image
-                if (publish_compressed_ && m_pub_pol_max_compressed_) {
-                  auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-                  compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                  compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                  compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
-                  compressed_msg->format = "jpeg";
-                  
-                  // Compress with JPEG (max_mat already computed above)
-                  std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-                  cv::imencode(".jpg", max_mat, compressed_msg->data, params);
-                  
-                  m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
-                }
-                
-                // bgr_channels automatically cleaned up by RAII when going out of scope
-                }  // end else (all_valid)
-              }
-              
-              // Compute and publish DOLP / AoLP via shared helper
-              if ((publish_dolp_ && m_pub_dolp_) || (publish_aolp_ && m_pub_aolp_)) {
-                compute_and_publish_dolp_aolp_(pImage, channels);
-              }
-            }
-            
-            // channels automatically cleaned up by RAII when going out of scope
-          }
-      } catch (std::exception& e) {
-        log_warn(std::string("Error extracting polarization channels: ") + e.what());
-      }
-      
-      this->m_pDevice->RequeueBuffer(pImage);
-
-    } catch (std::exception& e) {
-      m_image_publish_errors_++;
-      if (pImage) {
-        this->m_pDevice->RequeueBuffer(pImage);
-        pImage = nullptr;
-        log_warn(std::string("Exception occurred while publishing an image\n") +
-                 e.what());
-      }
-    }
-
-    // Force update diagnostics at a fixed interval since we're in a blocking loop
-    auto now = std::chrono::steady_clock::now();
-    if (now - last_diagnostics_update >= diagnostics_update_interval) {
-      m_diagnostic_updater_->force_update();
-      last_diagnostics_update = now;
-    }
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Worker thread: waits for a deep-copied image, then does the heavy processing
@@ -1218,6 +958,15 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
   try {
     if (!pImage) return;
 
+    // Check for incomplete frames (missing GigE packets) — common on MTU 1500 links
+    if (pImage->IsIncomplete()) {
+      m_incomplete_frames_++;
+      log_warn("Incomplete frame received (frame " + std::to_string(pImage->GetFrameId()) +
+               ", total incomplete: " + std::to_string(m_incomplete_frames_) +
+               ") — skipping. Check GigE MTU and cable quality.");
+      return;
+    }
+
     // Log pixel format on first image
     static bool format_logged = false;
     if (!format_logged) {
@@ -1244,9 +993,7 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
       uint64_t pixel_format = pImage->GetPixelFormat();
       if (!is_polarized_format(pixel_format)) {
         auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-        compressed_msg->header.stamp.sec  = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-        compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-        compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
+        fill_header_(compressed_msg->header, pImage);
         compressed_msg->format = "jpeg";
         arena_camera::ArenaImagePtr converted_image;
         Arena::IImage* image_to_compress = nullptr;
@@ -1317,9 +1064,7 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
               }
               if (publish_raw_ && *info.raw_pub) {
                 auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
-                pol_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                pol_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                pol_msg->header.frame_id = std::to_string(pImage->GetFrameId());
+                fill_header_(pol_msg->header, pImage);
                 pol_msg->height = bgr_image->GetHeight();
                 pol_msg->width = bgr_image->GetWidth();
                 pol_msg->encoding = "bgr8";
@@ -1332,9 +1077,7 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
               }
               if (publish_compressed_ && *info.compressed_pub) {
                 auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-                compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
+                fill_header_(compressed_msg->header, pImage);
                 compressed_msg->format = "jpeg";
                 cv::Mat bgr_mat(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3,
                                const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
@@ -1371,9 +1114,7 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                 if (display_images_active_) display_max = max_combined.clone();
                 if (publish_raw_ && m_pub_pol_max_) {
                   auto max_msg = std::make_unique<sensor_msgs::msg::Image>();
-                  max_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                  max_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                  max_msg->header.frame_id = std::to_string(pImage->GetFrameId());
+                  fill_header_(max_msg->header, pImage);
                   max_msg->height = height;
                   max_msg->width = width;
                   max_msg->encoding = "bgr8";
@@ -1386,9 +1127,7 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                 }
                 if (publish_compressed_ && m_pub_pol_max_compressed_) {
                   auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-                  compressed_msg->header.stamp.sec = static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-                  compressed_msg->header.stamp.nanosec = static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-                  compressed_msg->header.frame_id = std::to_string(pImage->GetFrameId());
+                  fill_header_(compressed_msg->header, pImage);
                   compressed_msg->format = "jpeg";
                   std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
                   cv::imencode(".jpg", max_combined, compressed_msg->data, params);
@@ -1396,7 +1135,7 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                 }
               }  // end all_valid
             }
-            
+
             // Compute and publish DOLP / AoLP; capture display images if needed
             if ((publish_dolp_ && m_pub_dolp_) || (publish_aolp_ && m_pub_aolp_)) {
               compute_and_publish_dolp_aolp_(pImage, channels,
@@ -1573,6 +1312,26 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
 }
 
 // ---------------------------------------------------------------------------
+// update_fps_locked_: update FPS rolling average.
+// MUST be called while holding m_stats_mutex_.
+// ---------------------------------------------------------------------------
+void ArenaCameraNode::update_fps_locked_(const std::chrono::steady_clock::time_point& now)
+{
+  m_fps_frame_count_++;
+  if (m_fps_frame_count_ == 1) {
+    m_fps_last_time_ = now;
+  } else {
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       now - m_fps_last_time_).count();
+    if (elapsed >= 1000) {
+      m_calculated_fps_ = (m_fps_frame_count_ * 1000.0) / elapsed;
+      m_fps_frame_count_ = 0;
+      m_fps_last_time_ = now;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // handle_camera_image_: called on the Arena SDK grab thread.
 // Must return FAST. Deep-copies the image and hands off to the worker thread.
 // ---------------------------------------------------------------------------
@@ -1605,29 +1364,41 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
     }
     m_worker_cv_.notify_one();
 
-    // Update watchdog / FPS counters (lightweight, safe in callback)
-    m_fps_frame_count_++;
-    auto now = std::chrono::steady_clock::now();
-    m_last_frame_time_ = now;
-    m_watchdog_initialized_ = true;
-    if (m_camera_frozen_) {
-      log_info("Camera recovered - frames are being received again");
-      m_camera_frozen_ = false;
-    }
-    if (m_fps_frame_count_ == 1) {
-      m_fps_last_time_ = now;
-    } else {
-      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         now - m_fps_last_time_).count();
-      if (elapsed >= 1000) {
-        m_calculated_fps_ = (m_fps_frame_count_ * 1000.0) / elapsed;
-        m_fps_frame_count_ = 0;
-        m_fps_last_time_ = now;
+    // Update watchdog / FPS counters under m_stats_mutex_ to prevent data race
+    // with produce_diagnostics_() which reads these from the ROS timer thread.
+    bool just_recovered = false;
+    {
+      std::lock_guard<std::mutex> slock(m_stats_mutex_);
+      auto now = std::chrono::steady_clock::now();
+      m_last_frame_time_ = now;
+      m_watchdog_initialized_ = true;
+      if (m_camera_frozen_) {
+        m_camera_frozen_ = false;
+        just_recovered = true;
       }
+      update_fps_locked_(now);
+    }
+    // Log outside the lock (logging can be slow / involve I/O)
+    if (just_recovered) {
+      log_info("Camera recovered - frames are being received again");
     }
   } catch (...) {
     log_err("Exception in OnImage callback during image copy");
   }
+}
+
+void ArenaCameraNode::fill_header_(std_msgs::msg::Header& header, Arena::IImage* pImage)
+{
+  if (use_camera_timestamp_) {
+    // Use camera hardware/PTP clock. Only valid when PTP is synchronized.
+    uint64_t ts_ns = pImage->GetTimestampNs();
+    header.stamp.sec    = static_cast<int32_t>(ts_ns / 1000000000ULL);
+    header.stamp.nanosec = static_cast<uint32_t>(ts_ns % 1000000000ULL);
+  } else {
+    // Default: ROS system clock — required for sensor fusion with IMU/LiDAR.
+    header.stamp = this->now();
+  }
+  header.frame_id = frame_id_;
 }
 
 void ArenaCameraNode::msg_form_image_(Arena::IImage* pImage,
@@ -1638,15 +1409,8 @@ void ArenaCameraNode::msg_form_image_(Arena::IImage* pImage,
     auto image_width = pImage->GetWidth();
     auto image_height = pImage->GetHeight();
 
-    // 1 ) Header
-    //      - stamp.sec
-    //      - stamp.nanosec
-    //      - Frame ID
-    image_msg.header.stamp.sec =
-        static_cast<uint32_t>(pImage->GetTimestampNs() / 1000000000);
-    image_msg.header.stamp.nanosec =
-        static_cast<uint32_t>(pImage->GetTimestampNs() % 1000000000);
-    image_msg.header.frame_id = std::to_string(pImage->GetFrameId());
+    // 1 ) Header — timestamp and TF frame_id via shared helper
+    fill_header_(image_msg.header, pImage);
 
     //
     // 2 ) Height
@@ -1712,24 +1476,37 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     log_warn(msg);
     response->message = msg;
     response->success = false;
+    return;
   }
 
   log_debug("A client triggered an image request");
 
   Arena::IImage* pImage = nullptr;
   try {
-    // trigger
+    // Wait for trigger to be armed with a timeout to prevent infinite busy-spin.
+    // SDK docs recommend polling TriggerArmed before executing TriggerSoftware.
     bool triggerArmed = false;
-    auto waitForTriggerCount = 10;
+    constexpr int MAX_TRIGGER_WAIT_ITERATIONS = 500;   // 500 × 10ms = 5 seconds
+    int waitForTriggerCount = 0;
     do {
-      // infinite loop when I step in (sometimes)
       triggerArmed =
           Arena::GetNodeValue<bool>(m_pDevice->GetNodeMap(), "TriggerArmed");
-
-      if (triggerArmed == false && (waitForTriggerCount % 10) == 0) {
-        log_debug("waiting for trigger to be armed");
+      if (!triggerArmed) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        waitForTriggerCount++;
+        if (waitForTriggerCount % 10 == 0) {
+          log_debug("waiting for trigger to be armed (" +
+                    std::to_string(waitForTriggerCount * 10) + "ms elapsed)");
+        }
+        if (waitForTriggerCount >= MAX_TRIGGER_WAIT_ITERATIONS) {
+          std::string msg = "Timed out waiting for trigger to arm after " +
+                            std::to_string(MAX_TRIGGER_WAIT_ITERATIONS * 10) + "ms";
+          log_err(msg);
+          response->message = msg;
+          response->success = false;
+          return;
+        }
       }
-
     } while (triggerArmed == false);
 
     log_debug("trigger is armed; triggering an image");
@@ -1739,27 +1516,30 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     auto p_image_msg = std::make_unique<sensor_msgs::msg::Image>();
 
     log_debug("getting an image");
-    pImage = m_pDevice->GetImage(1000);
+    int trigger_timeout_ms = std::max(5000, static_cast<int>(exposure_time_ / 1000.0) + 2000);
+    pImage = m_pDevice->GetImage(trigger_timeout_ms);
+
+    // Check for incomplete frames (missing GigE packets)
+    if (pImage->IsIncomplete()) {
+      m_incomplete_frames_++;
+      std::string msg = "Incomplete frame on trigger (frame " +
+                        std::to_string(pImage->GetFrameId()) + ")";
+      log_warn(msg);
+      response->message = msg;
+      response->success = false;
+      this->m_pDevice->RequeueBuffer(pImage);
+      return;
+    }
+
     auto msg = std::string("image ") + std::to_string(pImage->GetFrameId()) +
                " published to " + topic_;
     msg_form_image_(pImage, *p_image_msg);
     m_pub_->publish(std::move(p_image_msg));
     m_images_published_++;
-    
-    // Update FPS calculation
-    m_fps_frame_count_++;
-    auto now = std::chrono::steady_clock::now();
-    if (m_fps_frame_count_ == 1) {
-      m_fps_last_time_ = now;
-    } else {
-      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_fps_last_time_).count();
-      if (elapsed >= 1000) {  // Update FPS every second
-        m_calculated_fps_ = (m_fps_frame_count_ * 1000.0) / elapsed;
-        m_fps_frame_count_ = 0;
-        m_fps_last_time_ = now;
-      }
+    {
+      std::lock_guard<std::mutex> slock(m_stats_mutex_);
+      update_fps_locked_(std::chrono::steady_clock::now());
     }
-    
     response->message = msg;
     response->success = true;
 
@@ -1768,21 +1548,8 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
 
   }
 
-  catch (std::exception& e) {
-    m_image_publish_errors_++;
-    if (pImage) {
-      this->m_pDevice->RequeueBuffer(pImage);
-      pImage = nullptr;
-    }
-    auto msg =
-        std::string("Exception occurred while grabbing an image\n") + e.what();
-    log_warn(msg);
-    response->message = msg;
-    response->success = false;
-
-  }
-
   catch (GenICam::GenericException& e) {
+    // Catch GenICam before std::exception — GenericException inherits std::exception
     m_image_publish_errors_++;
     if (pImage) {
       this->m_pDevice->RequeueBuffer(pImage);
@@ -1796,8 +1563,62 @@ void ArenaCameraNode::publish_an_image_on_trigger_(
     response->success = false;
   }
 
+  catch (std::exception& e) {
+    m_image_publish_errors_++;
+    if (pImage) {
+      this->m_pDevice->RequeueBuffer(pImage);
+      pImage = nullptr;
+    }
+    auto msg =
+        std::string("Exception occurred while grabbing an image\n") + e.what();
+    log_warn(msg);
+    response->message = msg;
+    response->success = false;
+  }
+
   // Update diagnostics after trigger operation
   m_diagnostic_updater_->force_update();
+}
+
+rcl_interfaces::msg::SetParametersResult ArenaCameraNode::on_set_parameters_(
+    const std::vector<rclcpp::Parameter>& params)
+{
+  rcl_interfaces::msg::SetParametersResult result;
+  result.successful = true;
+
+  for (const auto& param : params) {
+    if (param.get_name() == "target_brightness") {
+      int64_t brightness = param.as_int();
+      if (brightness < 0 || brightness > 255) {
+        result.successful = false;
+        result.reason = "target_brightness " + std::to_string(brightness) + " out of range [0, 255]";
+        log_warn(result.reason);
+        return result;
+      }
+
+      if (!m_pDevice) {
+        target_brightness_ = brightness;
+        log_info("target_brightness cached to " + std::to_string(brightness) + " (device not yet connected)");
+      } else {
+        try {
+          auto nodemap = m_pDevice->GetNodeMap();
+          Arena::SetNodeValue<int64_t>(nodemap, "TargetBrightness", brightness);
+          target_brightness_ = brightness;
+          log_info("TargetBrightness set to " + std::to_string(brightness));
+        } catch (GenICam::GenericException& e) {
+          result.successful = false;
+          result.reason = std::string("GenICam error: ") + e.what();
+          log_err(result.reason);
+        } catch (std::exception& e) {
+          result.successful = false;
+          result.reason = std::string("Error: ") + e.what();
+          log_err(result.reason);
+        }
+      }
+    }
+  }
+
+  return result;
 }
 
 Arena::IDevice* ArenaCameraNode::create_device_ros_()
@@ -1810,7 +1631,7 @@ Arena::IDevice* ArenaCameraNode::create_device_ros_()
         "camera(s) were disconnected after they were discovered");
   }
 
-  auto index = 0;
+  size_t index = 0;
   if (is_passed_serial_) {
     index = DeviceInfoHelper::get_index_of_serial(device_infos, serial_);
   }
@@ -1823,7 +1644,30 @@ Arena::IDevice* ArenaCameraNode::create_device_ros_()
 
 void ArenaCameraNode::set_nodes_()
 {
-  set_nodes_load_default_profile_();
+  // Load default profile. On reconnect after a crash the camera may still be
+  // in a streaming state, which makes UserSet nodes read-only (AccessException).
+  // Treat this as non-fatal — remaining set_nodes_* calls will still apply config.
+  try {
+    set_nodes_load_default_profile_();
+  } catch (GenICam::GenericException& e) {
+    log_warn(std::string("\tCould not load default profile (camera may be in a bad state): ") + e.what());
+  } catch (std::exception& e) {
+    log_warn(std::string("\tCould not load default profile: ") + e.what());
+  }
+
+  // Explicitly set AcquisitionMode to "Continuous" regardless of the saved UserSet.
+  // SDK examples always set this — if someone previously saved the camera in
+  // SingleFrame mode, streaming will silently produce no frames without this.
+  try {
+    auto nodemap = m_pDevice->GetNodeMap();
+    Arena::SetNodeValue<GenICam::gcstring>(nodemap, "AcquisitionMode", "Continuous");
+    log_info("\tAcquisitionMode set to Continuous");
+  } catch (GenICam::GenericException& e) {
+    log_warn(std::string("\tCould not set AcquisitionMode: ") + e.what());
+  } catch (std::exception& e) {
+    log_warn(std::string("\tCould not set AcquisitionMode: ") + e.what());
+  }
+
   set_nodes_roi_();
   set_nodes_gain_();
   set_nodes_pixelformat_();
@@ -1850,6 +1694,18 @@ void ArenaCameraNode::set_nodes_()
     log_warn(std::string("\tStream configuration warning: ") + e.what());
   } catch (std::exception& e) {
     log_warn(std::string("\tStream configuration warning: ") + e.what());
+  }
+
+  // Reserve 10% of link bandwidth for packet resend retransmissions.
+  // SDK performance docs recommend this when StreamPacketResendEnable is true.
+  try {
+    auto nodemap = m_pDevice->GetNodeMap();
+    Arena::SetNodeValue<int64_t>(nodemap, "DeviceLinkThroughputReserve", 10);
+    log_debug("\tDeviceLinkThroughputReserve set to 10%");
+  } catch (GenICam::GenericException& e) {
+    log_warn(std::string("\tDeviceLinkThroughputReserve warning: ") + e.what());
+  } catch (std::exception& e) {
+    log_warn(std::string("\tDeviceLinkThroughputReserve warning: ") + e.what());
   }
 
   // Maximize GigE packet size for best throughput (follows RapidAcquisition example)
@@ -1889,19 +1745,52 @@ void ArenaCameraNode::set_nodes_roi_()
 
   // Width -------------------------------------------------
   if (is_passed_width) {
-    Arena::SetNodeValue<int64_t>(nodemap, "Width", width_);
+    // Align to camera increment (many cameras require multiples of 4, 8, or 16)
+    GenApi::CIntegerPtr pWidth = nodemap->GetNode("Width");
+    if (pWidth && GenApi::IsReadable(pWidth) && GenApi::IsWritable(pWidth)) {
+      int64_t min_val = pWidth->GetMin();
+      int64_t inc     = pWidth->GetInc();
+      int64_t max_val = pWidth->GetMax();
+      int64_t requested = static_cast<int64_t>(width_);
+      int64_t aligned = ((requested - min_val) / inc * inc) + min_val;
+      aligned = std::clamp(aligned, min_val, max_val);
+      if (aligned != requested) {
+        log_warn("\tWidth " + std::to_string(requested) + " adjusted to " +
+                 std::to_string(aligned) + " (increment=" + std::to_string(inc) + ")");
+        width_ = static_cast<size_t>(aligned);
+      }
+      pWidth->SetValue(aligned);
+    } else {
+      Arena::SetNodeValue<int64_t>(nodemap, "Width", static_cast<int64_t>(width_));
+    }
   } else {
     width_ = Arena::GetNodeValue<int64_t>(nodemap, "Width");
   }
 
   // Height ------------------------------------------------
   if (is_passed_height) {
-    Arena::SetNodeValue<int64_t>(nodemap, "Height", height_);
+    // Align to camera increment
+    GenApi::CIntegerPtr pHeight = nodemap->GetNode("Height");
+    if (pHeight && GenApi::IsReadable(pHeight) && GenApi::IsWritable(pHeight)) {
+      int64_t min_val = pHeight->GetMin();
+      int64_t inc     = pHeight->GetInc();
+      int64_t max_val = pHeight->GetMax();
+      int64_t requested = static_cast<int64_t>(height_);
+      int64_t aligned = ((requested - min_val) / inc * inc) + min_val;
+      aligned = std::clamp(aligned, min_val, max_val);
+      if (aligned != requested) {
+        log_warn("\tHeight " + std::to_string(requested) + " adjusted to " +
+                 std::to_string(aligned) + " (increment=" + std::to_string(inc) + ")");
+        height_ = static_cast<size_t>(aligned);
+      }
+      pHeight->SetValue(aligned);
+    } else {
+      Arena::SetNodeValue<int64_t>(nodemap, "Height", static_cast<int64_t>(height_));
+    }
   } else {
     height_ = Arena::GetNodeValue<int64_t>(nodemap, "Height");
   }
 
-  // TODO only if it was passed by ros arg
   log_info(std::string("\tROI set to ") + std::to_string(width_) + "X" +
            std::to_string(height_));
 }
@@ -2324,27 +2213,43 @@ void ArenaCameraNode::set_nodes_test_pattern_image_()
 
 void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat)
 {
-  // Watchdog: detect frozen camera (no new frames within timeout)
-  if (m_device_connected_ && m_watchdog_initialized_ && !trigger_mode_activated_) {
-    auto now = std::chrono::steady_clock::now();
-    double elapsed_sec = std::chrono::duration<double>(now - m_last_frame_time_).count();
-    
-    if (elapsed_sec > watchdog_timeout_sec_) {
-      if (!m_camera_frozen_) {
+  // Take a snapshot of stats under the mutex to avoid data races with the grab thread.
+  double calculated_fps;
+  bool watchdog_initialized, camera_frozen, just_froze = false;
+  double elapsed_since_last_frame = 0.0;
+  {
+    std::lock_guard<std::mutex> slock(m_stats_mutex_);
+    calculated_fps       = m_calculated_fps_;
+    watchdog_initialized = m_watchdog_initialized_;
+    camera_frozen        = m_camera_frozen_;
+
+    if (watchdog_initialized) {
+      auto now = std::chrono::steady_clock::now();
+      elapsed_since_last_frame = std::chrono::duration<double>(now - m_last_frame_time_).count();
+
+      // Watchdog: detect frozen camera (no new frames within timeout)
+      if (m_device_connected_ && !trigger_mode_activated_ &&
+          elapsed_since_last_frame > watchdog_timeout_sec_ && !m_camera_frozen_) {
         m_camera_frozen_ = true;
-        log_err("Watchdog: Camera appears frozen - no new frames for " +
-                std::to_string(elapsed_sec) + "s (timeout: " +
-                std::to_string(watchdog_timeout_sec_) + "s). Last frame " +
-                std::to_string(m_images_published_) + " published.");
+        camera_frozen    = true;
+        just_froze       = true;
       }
     }
   }
 
+  // Log outside the lock (log calls can be slow)
+  if (just_froze) {
+    log_err("Watchdog: Camera appears frozen - no new frames for " +
+            std::to_string(elapsed_since_last_frame) + "s (timeout: " +
+            std::to_string(watchdog_timeout_sec_) + "s). Last frame " +
+            std::to_string(m_images_published_) + " published.");
+  }
+
   if (m_device_connected_) {
-    if (m_camera_frozen_) {
+    if (camera_frozen) {
       stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR,
                    "Camera frozen - no new frames received");
-    } else if (m_image_publish_errors_ > 0 || m_backpressure_events_ > 0) {
+    } else if (m_image_publish_errors_ > 0 || m_backpressure_events_ > 0 || m_incomplete_frames_ > 0) {
       std::string warn_msg = "Camera connected with";
       if (m_image_publish_errors_ > 0) {
         warn_msg += " errors";
@@ -2352,6 +2257,10 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
       if (m_backpressure_events_ > 0) {
         if (m_image_publish_errors_ > 0) warn_msg += " and";
         warn_msg += " backpressure";
+      }
+      if (m_incomplete_frames_ > 0) {
+        if (m_image_publish_errors_ > 0 || m_backpressure_events_ > 0) warn_msg += " and";
+        warn_msg += " incomplete frames";
       }
       stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, warn_msg);
     } else {
@@ -2366,7 +2275,8 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
   stat.add("Device Connected", m_device_connected_ ? "true" : "false");
   stat.add("Images Published", std::to_string(m_images_published_));
   stat.add("Publish Errors", std::to_string(m_image_publish_errors_));
-  stat.add("Calculated FPS", std::to_string(m_calculated_fps_));
+  stat.add("Incomplete Frames", std::to_string(m_incomplete_frames_));
+  stat.add("Calculated FPS", std::to_string(calculated_fps));
   stat.add("Trigger Mode", trigger_mode_activated_ ? "enabled" : "disabled");
   stat.add("Topic", topic_);
   
@@ -2383,12 +2293,10 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
   stat.add("Processing Time Samples", std::to_string(m_processing_time_samples_));
   
   // Watchdog metrics
-  stat.add("Camera Frozen", m_camera_frozen_ ? "true" : "false");
+  stat.add("Camera Frozen", camera_frozen ? "true" : "false");
   stat.add("Watchdog Timeout (sec)", std::to_string(watchdog_timeout_sec_));
-  if (m_watchdog_initialized_) {
-    auto now = std::chrono::steady_clock::now();
-    double since_last = std::chrono::duration<double>(now - m_last_frame_time_).count();
-    stat.add("Time Since Last Frame (sec)", std::to_string(since_last));
+  if (watchdog_initialized) {
+    stat.add("Time Since Last Frame (sec)", std::to_string(elapsed_since_last_frame));
   } else {
     stat.add("Time Since Last Frame (sec)", "N/A (no frames yet)");
   }

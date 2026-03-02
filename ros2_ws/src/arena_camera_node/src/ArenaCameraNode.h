@@ -31,6 +31,7 @@
 #include <rclcpp/timer.hpp>           // WallTimer
 #include <sensor_msgs/msg/image.hpp>  //image msg published
 #include <sensor_msgs/msg/compressed_image.hpp>  // compressed image
+#include <std_msgs/msg/header.hpp>    // for fill_header_ helper
 #include <std_srvs/srv/trigger.hpp>   // Trigger
 #include <diagnostic_updater/diagnostic_updater.hpp>  // diagnostics
 
@@ -51,6 +52,7 @@ class ArenaCameraNode : public rclcpp::Node
   ArenaCameraNode() : Node("arena_camera_node"),
     m_images_published_(0),
     m_image_publish_errors_(0),
+    m_incomplete_frames_(0),
     m_device_connected_(false),
     m_is_streaming_(false)
   {
@@ -162,10 +164,10 @@ class ArenaCameraNode : public rclcpp::Node
     log_info(std::string("Destroyed \"") + this->get_name() + "\" node");
   }
 
-  void log_debug(std::string msg) { RCLCPP_DEBUG(this->get_logger(), msg.c_str()); };
-  void log_info(std::string msg) { RCLCPP_INFO(this->get_logger(), msg.c_str()); };
-  void log_warn(std::string msg) { RCLCPP_WARN(this->get_logger(), msg.c_str()); };
-  void log_err(std::string msg) { RCLCPP_ERROR(this->get_logger(), msg.c_str()); };
+  void log_debug(const std::string& msg) { RCLCPP_DEBUG(this->get_logger(), "%s", msg.c_str()); };
+  void log_info(const std::string& msg) { RCLCPP_INFO(this->get_logger(), "%s", msg.c_str()); };
+  void log_warn(const std::string& msg) { RCLCPP_WARN(this->get_logger(), "%s", msg.c_str()); };
+  void log_err(const std::string& msg) { RCLCPP_ERROR(this->get_logger(), "%s", msg.c_str()); };
 
  private:
   // Image callback handler class for ArenaSDK event-driven acquisition
@@ -208,6 +210,7 @@ class ArenaCameraNode : public rclcpp::Node
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_aolp_compressed_;
   rclcpp::TimerBase::SharedPtr m_wait_for_device_timer_callback_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr m_trigger_an_image_srv_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr m_param_callback_handle_;
   
   // Image callback handler for event-driven acquisition
   std::unique_ptr<ImageCallbackHandler> m_image_callback_handler_;
@@ -223,23 +226,27 @@ class ArenaCameraNode : public rclcpp::Node
   Arena::IImage* m_pending_image_{nullptr};  // Deep copy handed off by OnImage
   void worker_thread_func_();
   void process_copied_image_(Arena::IImage* pImage);
+  // Update FPS rolling average — must be called under m_stats_mutex_.
+  void update_fps_locked_(const std::chrono::steady_clock::time_point& now);
 
   // Diagnostics
   std::unique_ptr<diagnostic_updater::Updater> m_diagnostic_updater_;
   uint64_t m_images_published_;
   uint64_t m_image_publish_errors_;
+  uint64_t m_incomplete_frames_;   // GigE frames with missing packets (IsIncomplete)
   bool m_device_connected_;
   
   // Streaming state for proper cleanup (atomic for thread safety between destructor and deleters)
   std::atomic<bool> m_is_streaming_;
-  
-  // FPS calculation
+
+  // FPS / watchdog stats — written by grab thread (handle_camera_image_),
+  // read by ROS timer thread (produce_diagnostics_). Guarded by m_stats_mutex_.
+  mutable std::mutex m_stats_mutex_;
   std::chrono::steady_clock::time_point m_fps_last_time_;
   uint64_t m_fps_frame_count_;
   double m_calculated_fps_;
 
   // Backpressure monitoring (Task 4)
-  std::atomic<bool> m_processing_image_{false};  // Flag to detect if still processing
   uint64_t m_backpressure_events_{0};            // Count of skipped frames due to backpressure
   double m_last_processing_time_ms_{0.0};        // Last frame processing time in ms
   double m_max_processing_time_ms_{0.0};         // Max processing time observed
@@ -251,6 +258,9 @@ class ArenaCameraNode : public rclcpp::Node
 
   std::string topic_;
   bool is_passed_topic_;
+
+  std::string frame_id_;              // TF coordinate frame name for all published images
+  bool use_camera_timestamp_;         // true = camera hardware clock; false = ROS clock (default)
 
   size_t width_;
   bool is_passed_width;
@@ -303,6 +313,8 @@ class ArenaCameraNode : public rclcpp::Node
 
   bool trigger_mode_activated_;
 
+  int stream_buffer_count_;  // Number of SDK stream buffers (passed to StartStream)
+
   std::string pub_qos_history_;
   bool is_passed_pub_qos_history_;
 
@@ -326,6 +338,7 @@ class ArenaCameraNode : public rclcpp::Node
   
   // Watchdog settings (Task 20)
   double watchdog_timeout_sec_;  // Seconds without a new frame before declaring camera frozen (default 5.0)
+  // Watchdog state — guarded by m_stats_mutex_
   std::chrono::steady_clock::time_point m_last_frame_time_;  // Timestamp of last successfully received frame
   bool m_watchdog_initialized_{false};  // Whether we've received at least one frame
   bool m_camera_frozen_{false};  // Whether the camera is currently detected as frozen
@@ -357,13 +370,18 @@ class ArenaCameraNode : public rclcpp::Node
   void set_nodes_frame_rate_();
   void set_nodes_trigger_mode_();
   void set_nodes_test_pattern_image_();
-  void publish_images_();  // Legacy blocking implementation
-
   void publish_an_image_on_trigger_(
       std::shared_ptr<std_srvs::srv::Trigger::Request> request,
       std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+  rcl_interfaces::msg::SetParametersResult on_set_parameters_(
+      const std::vector<rclcpp::Parameter>& params);
   void msg_form_image_(Arena::IImage* pImage,
                        sensor_msgs::msg::Image& image_msg);
+
+  // Fill a ROS message header with timestamp and frame_id.
+  // Uses ROS clock (this->now()) unless use_camera_timestamp_ is true, in which
+  // case the camera's hardware/PTP timestamp (pImage->GetTimestampNs()) is used.
+  void fill_header_(std_msgs::msg::Header& header, Arena::IImage* pImage);
 
   // Diagnostics
   void produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat);

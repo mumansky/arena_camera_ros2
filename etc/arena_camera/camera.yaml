@@ -13,6 +13,21 @@
     # -------------------------
     # The ROS topic name where images will be published
     topic: "/arena_camera_node/images"
+
+    # TF Frame ID
+    # -----------
+    # The coordinate frame name for all published image headers.
+    # Used by tf2 for 3D transforms (e.g., camera → base_link in URDF).
+    # For drone sensor fusion, this must match the frame defined in your URDF/TF tree.
+    frame_id: "camera_optical_frame"
+
+    # Timestamp Source
+    # ----------------
+    # false (default): Use ROS system clock (this->now()) for all image timestamps.
+    #   Required for correct sensor fusion with IMU, LiDAR, barometer, etc.
+    #   Use this unless PTP is explicitly configured and synchronized.
+    # true: Use camera hardware clock (GetTimestampNs()) — only valid with PTP sync.
+    use_camera_timestamp: false
     
     # QoS Settings
     # ------------
@@ -76,11 +91,11 @@
     # Advanced Auto Exposure Control
     # ------------------------------
     # Algorithm for auto exposure calculation. Common values: "Mean", "Median" 
-    #exposure_auto_algorithm: "Mean"
+    exposure_auto_algorithm: "Mean"
     # Target brightness value for auto exposure (0-255, typically 128)
     target_brightness: 30
     # Response speed for auto exposure changes (0-100, higher = slower response)
-    #exposure_auto_damping: 20.0          # much faster convergence (default ~90)
+    exposure_auto_damping: 10          # much faster convergence (default ~90)
     # Auto limit control: "Off" (manual limits), "Continuous" (auto-calculated limits)
     #exposure_auto_limit_auto: "Off"       # take manual control of limits
     # Manual upper limit for auto exposure in microseconds (when limit_auto is "Off")
@@ -112,6 +127,13 @@
     # When true, the camera will only capture images when triggered via the trigger_image service
     # When false (default), the camera continuously acquires and publishes images
     trigger_mode: false
+
+    # Stream Buffer Count
+    # -------------------
+    # Number of internal SDK stream buffers allocated for image acquisition.
+    # More buffers reduce the chance of dropped frames when processing is slow.
+    # Default: 10. For high-throughput or high-latency scenarios, increase to 20-50.
+    stream_buffer_count: 10
 
     # Image Publishing Options
     # ------------------------
