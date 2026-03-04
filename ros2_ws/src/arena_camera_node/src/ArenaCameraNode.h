@@ -42,6 +42,11 @@
 // OpenCV (for cv::Mat in compute_and_publish_dolp_aolp_ signature)
 #include <opencv2/core.hpp>
 
+// Optional nvJPEG hardware JPEG encoder (Orin/Jetson; no-op on x86 without CUDA)
+#ifdef HAS_CUDA
+#include "nvjpeg_encoder.h"
+#endif
+
 class ArenaCameraNode : public rclcpp::Node
 {
  private:
@@ -335,6 +340,12 @@ class ArenaCameraNode : public rclcpp::Node
   std::string save_session_dir_;      // Created on first 's' keypress
   
   int jpeg_quality_;  // JPEG compression quality (1-100, default 80)
+  bool profile_processing_;  // Log per-frame timing breakdown for each processing stage
+  std::string gpu_acceleration_;  // "auto" | "gpu" | "cpu" (from camera.yaml)
+  bool use_gpu_jpeg_{false};      // Runtime: true when nvJPEG encoder is active
+#ifdef HAS_CUDA
+  std::unique_ptr<NvJpegEncoder> nvjpeg_encoder_;
+#endif
   
   // Watchdog settings (Task 20)
   double watchdog_timeout_sec_;  // Seconds without a new frame before declaring camera frozen (default 5.0)
@@ -386,11 +397,18 @@ class ArenaCameraNode : public rclcpp::Node
   // Diagnostics
   void produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat);
 
-  // Shared helper: compute DOLP and AoLP from 4 polarization channels and publish.
+  // Encode img (CV_8UC3 BGR or CV_8UC1 mono8) to JPEG bytes.
+  // Uses nvJPEG hardware encoder when available; falls back to cv::imencode.
+  void jpeg_encode_(const cv::Mat& img, std::vector<uint8_t>& out);
+
+  // Shared helper: compute DOLP and AoLP from 4 pre-converted BGR mats and publish.
+  // cached_bgr[4] must be non-empty CV_8UC3 mats (reused from per-channel conversion).
+  // Derives grayscale intensity via cvtColor(BGR→GRAY) to avoid a duplicate Arena SDK
+  // Bayer→Mono8 conversion pass.
   // out_dolp / out_aolp (optional) receive clones of the computed images for display.
   void compute_and_publish_dolp_aolp_(
       Arena::IImage* pImage,
-      const arena_camera::ArenaImageVector& channels,
+      const cv::Mat cached_bgr[4],
       cv::Mat* out_dolp = nullptr,
       cv::Mat* out_aolp = nullptr);
 };

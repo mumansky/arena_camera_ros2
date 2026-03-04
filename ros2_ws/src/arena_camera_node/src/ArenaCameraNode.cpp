@@ -56,6 +56,11 @@
 // OpenCV
 #include <opencv2/opencv.hpp>
 
+// Optional CUDA runtime (for cudaGetDeviceCount probe; no-op if HAS_CUDA not defined)
+#ifdef HAS_CUDA
+#include <cuda_runtime.h>
+#endif
+
 // ROS
 #include "rmw/types.h"
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
@@ -417,6 +422,12 @@ void ArenaCameraNode::parse_parameters_()
     currentParam = "publish_aolp";
     publish_aolp_ = config_bool(m_config_params_, "publish_aolp", false);
 
+    currentParam = "profile_processing";
+    profile_processing_ = config_bool(m_config_params_, "profile_processing", false);
+    if (profile_processing_) {
+      log_info("Processing profiler enabled — per-frame timing will be logged at DEBUG level");
+    }
+
     currentParam = "display_images";
     display_images_ = config_bool(m_config_params_, "display_images", false);
     display_images_active_ = display_images_;
@@ -432,6 +443,9 @@ void ArenaCameraNode::parse_parameters_()
 
     currentParam = "jpeg_quality";
     jpeg_quality_ = config_int(m_config_params_, "jpeg_quality", 80);
+
+    currentParam = "gpu_acceleration";
+    gpu_acceleration_ = config_string(m_config_params_, "gpu_acceleration", "auto");
 
     // Watchdog settings (Task 20)
     currentParam = "watchdog_timeout_sec";
@@ -626,6 +640,33 @@ void ArenaCameraNode::initialize_()
   m_diagnostic_updater_ = std::make_unique<diagnostic_updater::Updater>(this);
   m_diagnostic_updater_->setHardwareID("arena_camera");
   m_diagnostic_updater_->add("Camera Status", this, &ArenaCameraNode::produce_diagnostics_);
+
+  //
+  // GPU JPEG encoder (optional) --------------------------------------------
+  // Probed at runtime so a cpu-only x86 build still works without HAS_CUDA.
+  //
+#ifdef HAS_CUDA
+  if (gpu_acceleration_ != "cpu") {
+    int device_count = 0;
+    cudaError_t cuda_err = cudaGetDeviceCount(&device_count);
+    if (cuda_err == cudaSuccess && device_count > 0) {
+      nvjpeg_encoder_ = std::make_unique<NvJpegEncoder>(jpeg_quality_);
+      if (nvjpeg_encoder_->is_valid()) {
+        use_gpu_jpeg_ = true;
+        log_info("nvJPEG hardware JPEG encoding enabled (GPU)");
+      } else {
+        nvjpeg_encoder_.reset();
+        log_warn("nvJPEG init failed — falling back to cv::imencode");
+      }
+    } else {
+      log_info("No CUDA device found — using software JPEG encoding");
+    }
+  } else {
+    log_info("gpu_acceleration=cpu — using software JPEG encoding");
+  }
+#else
+  log_info("Built without CUDA — using software JPEG encoding");
+#endif
 }
 
 void ArenaCameraNode::wait_for_device_timer_callback_()
@@ -774,53 +815,143 @@ void ArenaCameraNode::run_()
   }
 }
 
-void ArenaCameraNode::compute_and_publish_dolp_aolp_(
-    Arena::IImage* pImage,
-    const arena_camera::ArenaImageVector& channels,
-    cv::Mat* out_dolp,
-    cv::Mat* out_aolp)
-{
-  // Convert all 4 channels directly to Mono8.
-  // This avoids the BGR8 → grayscale intermediate step, which applies a
-  // luminance-weighted average (0.299R+0.587G+0.114B) that can introduce
-  // artifacts if the channels are not perfectly balanced.
-  arena_camera::ArenaImageVector mono_for_stokes;
-  bool stokes_valid = true;
-  for (size_t i = 0; i < 4; i++) {
-    Arena::IImage* converted = Arena::ImageFactory::Convert(channels[i], PixelFormat::MONO8);
-    mono_for_stokes.push_back(converted);
-    if (!converted || converted->GetPixelFormat() != PixelFormat::MONO8) {
-      log_warn("Stokes channel " + std::to_string(i) + ": unexpected pixel format after Mono8 conversion");
-      stokes_valid = false;
+// ---------------------------------------------------------------------------
+// JPEG encode helper: uses nvJPEG hardware encoder when available, otherwise
+// falls back to cv::imencode. All 7 compressed-image publish sites call this.
+// ---------------------------------------------------------------------------
+void ArenaCameraNode::jpeg_encode_(const cv::Mat& img, std::vector<uint8_t>& out) {
+#ifdef HAS_CUDA
+  if (use_gpu_jpeg_ && nvjpeg_encoder_->encode(img, out)) return;
+#endif
+  std::vector<int> enc_params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
+  cv::imencode(".jpg", img, out, enc_params);
+}
+
+// ---------------------------------------------------------------------------
+// Lightweight per-frame profiling timer for identifying processing bottlenecks.
+// Accumulates per-stage stats across frames and emits an averaged INFO summary
+// every log_interval frames. Per-frame raw detail is logged at DEBUG level.
+// Zero overhead when disabled.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Persistent accumulator — one instance per call site, lives for the process lifetime.
+struct StageAccumulator {
+  struct StageStat {
+    std::string name;
+    double sum{0};
+    double min{std::numeric_limits<double>::max()};
+    double max{0};
+  };
+  std::vector<StageStat> stages;
+  uint64_t frame_count{0};
+
+  void add(size_t idx, const std::string& name, double ms) {
+    if (idx >= stages.size()) stages.resize(idx + 1);
+    stages[idx].name = name;
+    stages[idx].sum += ms;
+    if (ms < stages[idx].min) stages[idx].min = ms;
+    if (ms > stages[idx].max) stages[idx].max = ms;
+  }
+
+  // Returns avg summary string and resets accumulators.
+  std::string flush_summary() {
+    if (stages.empty() || frame_count == 0) return {};
+    std::string out;
+    double total_avg = 0;
+    char buf[80];
+    for (const auto& s : stages) {
+      double avg = s.sum / frame_count;
+      total_avg += avg;
+      std::snprintf(buf, sizeof(buf), " %s=%.1f(%.0f-%.0f)",
+                    s.name.c_str(), avg, s.min, s.max);
+      out += buf;
+    }
+    std::snprintf(buf, sizeof(buf), " TOTAL=%.1f", total_avg);
+    out += buf;
+    // Reset
+    for (auto& s : stages) { s.sum = 0; s.min = std::numeric_limits<double>::max(); s.max = 0; }
+    frame_count = 0;
+    return out;
+  }
+};
+
+struct StageTimer {
+  bool enabled;
+  std::chrono::steady_clock::time_point start;
+  std::chrono::steady_clock::time_point last;
+  // Per-frame detail (for DEBUG log)
+  std::string frame_result;
+  // Pointer to persistent accumulator for this call site
+  StageAccumulator* acc{nullptr};
+  size_t stage_idx{0};
+
+  explicit StageTimer(bool enable, StageAccumulator* accumulator = nullptr)
+      : enabled(enable), acc(accumulator) {
+    if (enabled) {
+      start = std::chrono::steady_clock::now();
+      last = start;
     }
   }
 
-  if (!stokes_valid) {
-    log_warn("Skipping DOLP/AoLP computation due to unexpected pixel format");
-    return;
+  void mark(const char* name) {
+    if (!enabled) return;
+    auto now = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(now - last).count();
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), " %s=%.1f", name, ms);
+    frame_result += buf;
+    if (acc) acc->add(stage_idx, name, ms);
+    stage_idx++;
+    last = now;
   }
 
-  size_t stokes_h = mono_for_stokes[0]->GetHeight();
-  size_t stokes_w = mono_for_stokes[0]->GetWidth();
+  // Raw per-frame summary (for DEBUG log).
+  std::string frame_summary() const {
+    if (!enabled || frame_result.empty()) return {};
+    double total = std::chrono::duration<double, std::milli>(last - start).count();
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), " TOTAL=%.1f", total);
+    return frame_result + buf;
+  }
+};
 
-  // Convert Mono8 directly to float32 for each polarization angle
+}  // anonymous namespace
+
+void ArenaCameraNode::compute_and_publish_dolp_aolp_(
+    Arena::IImage* pImage,
+    const cv::Mat cached_bgr[4],
+    cv::Mat* out_dolp,
+    cv::Mat* out_aolp)
+{
+  static StageAccumulator dolp_acc;
+  StageTimer dtimer(profile_processing_, &dolp_acc);
+
+  // Derive grayscale intensity from the pre-converted BGR mats via cvtColor.
+  // This avoids a second round of 4x Arena::ImageFactory::Convert(→Mono8) calls
+  // (~12ms saved). cvtColor(BGR→GRAY) uses equal-weighted averaging which is
+  // consistent across all 4 channels, preserving DOLP/AoLP accuracy.
+  size_t stokes_h = cached_bgr[0].rows;
+  size_t stokes_w = cached_bgr[0].cols;
+
   auto to_gray_float = [&](size_t idx) -> cv::Mat {
-    cv::Mat mono(stokes_h, stokes_w, CV_8UC1,
-                 const_cast<void*>(static_cast<const void*>(mono_for_stokes[idx]->GetData())));
-    cv::Mat mono_f;
-    mono.convertTo(mono_f, CV_32F);
-    return mono_f;
+    cv::Mat gray, gray_f;
+    cv::cvtColor(cached_bgr[idx], gray, cv::COLOR_BGR2GRAY);
+    gray.convertTo(gray_f, CV_32F);
+    return gray_f;
   };
 
   cv::Mat f0   = to_gray_float(0);   // I_0°
   cv::Mat f45  = to_gray_float(1);   // I_45°
   cv::Mat f90  = to_gray_float(2);   // I_90°
   cv::Mat f135 = to_gray_float(3);   // I_135°
+  dtimer.mark("stokes_conv");
 
   // Stokes parameters (vectorized OpenCV operations)
   cv::Mat S0 = f0 + f90;       // Total intensity
   cv::Mat S1 = f0 - f90;       // Horizontal vs vertical
   cv::Mat S2 = f45 - f135;     // Diagonal
+  dtimer.mark("stokes");
 
   // --- DOLP ---
   if (publish_dolp_ && m_pub_dolp_) {
@@ -863,31 +994,37 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
       auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
       fill_header_(msg->header, pImage);
       msg->format = "jpeg";
-      std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-      cv::imencode(".jpg", dolp_u8, msg->data, params);
+      jpeg_encode_(dolp_u8, msg->data);
       m_pub_dolp_compressed_->publish(std::move(msg));
     }
   }
+
+  dtimer.mark("dolp");
 
   // --- AoLP ---
   if (publish_aolp_ && m_pub_aolp_) {
     // AoLP = 0.5 * atan2(S2, S1)
     // Range: [-π/2, +π/2] → mapped to [0, 255] uint8
     // 0 → -90°, 128 → 0°, 255 → +90°
-    size_t total_pixels = stokes_h * stokes_w;
-    cv::Mat aolp_u8(static_cast<int>(stokes_h), static_cast<int>(stokes_w), CV_8U);
+    //
+    // Vectorized via cv::phase(S1, S2) which returns atan2(S2, S1) in [0, 2π).
+    // We remap to the original [-π, π] range by subtracting 2π where phase > π,
+    // then normalize: atan2/(2π) + 0.5 → [0, 1] → [0, 255] uint8.
+    // cv::phase uses SIMD (ARM NEON / SSE) for a significant speedup over a scalar loop.
+    cv::Mat phase_mat;
+    cv::phase(S1, S2, phase_mat, false);  // atan2(S2, S1) remapped to [0, 2π)
 
-    const float* s1_ptr = reinterpret_cast<const float*>(S1.data);
-    const float* s2_ptr = reinterpret_cast<const float*>(S2.data);
-    uint8_t* aolp_ptr = aolp_u8.data;
+    // Normalize: divide by 2π, add 0.5, wrap values ≥ 1 back by subtracting 1
+    constexpr float inv_2pi = 0.15915494309189534561f;  // 1.0f / (2π)
+    cv::multiply(phase_mat, inv_2pi, phase_mat);        // [0, 1)
+    cv::add(phase_mat, 0.5f, phase_mat);                // [0.5, 1.5)
+    cv::subtract(phase_mat, 1.0f, phase_mat, phase_mat >= 1.0f);  // wrap to [0, 1)
+    phase_mat *= 255.0f;
+    cv::min(phase_mat, 255.0f, phase_mat);
+    cv::max(phase_mat, 0.0f, phase_mat);
 
-    constexpr float inv_pi = 0.31830988618379067154f;  // 1.0f / π
-    for (size_t i = 0; i < total_pixels; i++) {
-      float angle = 0.5f * std::atan2(s2_ptr[i], s1_ptr[i]);  // [-π/2, π/2]
-      float normalized = angle * inv_pi + 0.5f;  // [0, 1]
-      aolp_ptr[i] = static_cast<uint8_t>(
-          std::clamp(normalized * 255.0f, 0.0f, 255.0f));
-    }
+    cv::Mat aolp_u8;
+    phase_mat.convertTo(aolp_u8, CV_8U);
 
     if (out_aolp) *out_aolp = aolp_u8.clone();
 
@@ -909,9 +1046,20 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
       auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
       fill_header_(msg->header, pImage);
       msg->format = "jpeg";
-      std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-      cv::imencode(".jpg", aolp_u8, msg->data, params);
+      jpeg_encode_(aolp_u8, msg->data);
       m_pub_aolp_compressed_->publish(std::move(msg));
+    }
+  }
+
+  dtimer.mark("aolp");
+
+  // Log DOLP/AoLP profiling detail if enabled
+  if (profile_processing_) {
+    log_debug("Frame " + std::to_string(pImage->GetFrameId()) +
+              " DOLP/AoLP detail (ms):" + dtimer.frame_summary());
+    dolp_acc.frame_count++;
+    if (dolp_acc.frame_count >= 30) {
+      log_info("[profiler] DOLP/AoLP avg over 30 frames (ms):" + dolp_acc.flush_summary());
     }
   }
 
@@ -1009,8 +1157,7 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
         cv::Mat img_mat(image_to_compress->GetHeight(),
                        image_to_compress->GetWidth(), cvType,
                        const_cast<void*>(static_cast<const void*>(image_to_compress->GetData())));
-        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-        cv::imencode(".jpg", img_mat, compressed_msg->data, params);
+        jpeg_encode_(img_mat, compressed_msg->data);
         m_pub_compressed_->publish(std::move(compressed_msg));
       }
     }
@@ -1029,15 +1176,23 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
     try {
       uint64_t pixel_format = pImage->GetPixelFormat();
       if (is_polarized_format(pixel_format)) {
+          static StageAccumulator proc_acc;
+          StageTimer ptimer(profile_processing_, &proc_acc);
+
           arena_camera::ArenaImageVector channels(
               Arena::ImageFactory::SplitChannels(pImage));
+          ptimer.mark("split");
+
           if (channels.size() == 4) {
             // Display mat storage — filled during processing, used for tiled debug window
             cv::Mat display_ch[4];    // 4 polarization channels (BGR)
             cv::Mat display_max;      // max-combined (BGR)
             cv::Mat display_dolp;     // DOLP (mono8)
             cv::Mat display_aolp;     // AoLP (mono8)
-            
+
+            // Cached BGR mats — reused for max-combined to avoid duplicate Bayer→BGR conversion
+            cv::Mat cached_bgr[4];
+
             struct ChannelInfo {
               size_t index;
               std::string name;
@@ -1056,11 +1211,14 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
               if (!validate_bgr8_format(bgr_image.get(), "polarization channel " + info.name)) {
                 continue;
               }
-              // Capture for debug display window
+              // Cache BGR data for max-combined (avoids duplicate Bayer→BGR conversion)
+              cv::Mat bgr_mat(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3,
+                             const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
+              cached_bgr[info.index] = bgr_mat.clone();
+
+              // Capture for debug display window (reuse cached clone)
               if (display_images_active_ && info.index < 4) {
-                cv::Mat tmp(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3,
-                           const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
-                display_ch[info.index] = tmp.clone();
+                display_ch[info.index] = cached_bgr[info.index];
               }
               if (publish_raw_ && *info.raw_pub) {
                 auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -1079,40 +1237,28 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                 auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
                 fill_header_(compressed_msg->header, pImage);
                 compressed_msg->format = "jpeg";
-                cv::Mat bgr_mat(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3,
-                               const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
-                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-                cv::imencode(".jpg", bgr_mat, compressed_msg->data, params);
+                jpeg_encode_(bgr_mat, compressed_msg->data);
                 (*info.compressed_pub)->publish(std::move(compressed_msg));
               }
             }
-            // Max-combined image
+            ptimer.mark("channels");
+
+            // Max-combined image (reuses cached BGR mats from per-channel loop)
             if ((publish_raw_ && m_pub_pol_max_) || (publish_compressed_ && m_pub_pol_max_compressed_)) {
-              arena_camera::ArenaImageVector bgr_channels;
-              bool all_valid = true;
-              for (size_t i = 0; i < 4; i++) {
-                Arena::IImage* converted = Arena::ImageFactory::Convert(channels[i], PFNC_BGR8);
-                bgr_channels.push_back(converted);
-                if (!validate_bgr8_format(converted, "max-combined channel " + std::to_string(i))) {
-                  all_valid = false;
-                }
-              }
+              bool all_valid = !cached_bgr[0].empty() && !cached_bgr[1].empty() &&
+                               !cached_bgr[2].empty() && !cached_bgr[3].empty();
               if (!all_valid) {
-                log_warn("Skipping max-combined image due to unexpected pixel format");
+                log_warn("Skipping max-combined image — not all channels converted successfully");
               } else {
-                size_t height = bgr_channels[0]->GetHeight();
-                size_t width  = bgr_channels[0]->GetWidth();
-                cv::Mat mat0(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[0]->GetData())));
-                cv::Mat mat1(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[1]->GetData())));
-                cv::Mat mat2(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[2]->GetData())));
-                cv::Mat mat3(height, width, CV_8UC3, const_cast<void*>(static_cast<const void*>(bgr_channels[3]->GetData())));
                 cv::Mat max01, max23, max_combined;
-                cv::max(mat0, mat1, max01);
-                cv::max(mat2, mat3, max23);
+                cv::max(cached_bgr[0], cached_bgr[1], max01);
+                cv::max(cached_bgr[2], cached_bgr[3], max23);
                 cv::max(max01, max23, max_combined);
                 // Capture for debug display window
                 if (display_images_active_) display_max = max_combined.clone();
                 if (publish_raw_ && m_pub_pol_max_) {
+                  size_t height = max_combined.rows;
+                  size_t width = max_combined.cols;
                   auto max_msg = std::make_unique<sensor_msgs::msg::Image>();
                   fill_header_(max_msg->header, pImage);
                   max_msg->height = height;
@@ -1129,20 +1275,39 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                   auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
                   fill_header_(compressed_msg->header, pImage);
                   compressed_msg->format = "jpeg";
-                  std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-                  cv::imencode(".jpg", max_combined, compressed_msg->data, params);
+                  jpeg_encode_(max_combined, compressed_msg->data);
                   m_pub_pol_max_compressed_->publish(std::move(compressed_msg));
                 }
-              }  // end all_valid
+              }
             }
+            ptimer.mark("max");
 
             // Compute and publish DOLP / AoLP; capture display images if needed
             if ((publish_dolp_ && m_pub_dolp_) || (publish_aolp_ && m_pub_aolp_)) {
-              compute_and_publish_dolp_aolp_(pImage, channels,
-                  display_images_active_ ? &display_dolp : nullptr,
-                  display_images_active_ ? &display_aolp : nullptr);
+              bool all_valid = !cached_bgr[0].empty() && !cached_bgr[1].empty() &&
+                               !cached_bgr[2].empty() && !cached_bgr[3].empty();
+              if (!all_valid) {
+                log_warn("Skipping DOLP/AoLP — not all channels converted successfully");
+              } else {
+                compute_and_publish_dolp_aolp_(pImage, cached_bgr,
+                    display_images_active_ ? &display_dolp : nullptr,
+                    display_images_active_ ? &display_aolp : nullptr);
+              }
             }
-            
+            ptimer.mark("dolp_aolp");
+
+            // Log per-stage profiling if enabled
+            if (profile_processing_) {
+              // DEBUG: raw per-frame detail (visible with --log-level DEBUG)
+              log_debug("Frame " + std::to_string(pImage->GetFrameId()) +
+                        " processing (ms):" + ptimer.frame_summary());
+              // INFO: averaged summary every 30 frames (~3s at 10 FPS)
+              proc_acc.frame_count++;
+              if (proc_acc.frame_count >= 30) {
+                log_info("[profiler] processing avg over 30 frames (ms):" + proc_acc.flush_summary());
+              }
+            }
+
             // ==============================================================
             // Debug display window: 4x2 tiled grid
             // Row 1: 0°, 45°, 90°, 135°

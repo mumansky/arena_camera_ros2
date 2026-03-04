@@ -156,6 +156,67 @@ target_link_libraries(${target_name} yaml-cpp)
 # OpenCV is required by ArenaSDK's libarena.so
 target_link_libraries(${target_name} ${OpenCV_LIBS})
 
+# --------------------------------------------------------------------------
+# Optional: CUDA / nvJPEG hardware JPEG encoding (Orin/Jetson)
+# nvjpeg_encoder.cpp is pure C++ — no nvcc needed.
+# On JetPack, headers land in /usr/local/cuda-<ver>/targets/<arch>/include/
+# after: sudo apt install cuda-cudart-dev-12-6 libnvjpeg-dev-12-6
+# Gracefully skipped on x86 hosts that don't have CUDA installed.
+# --------------------------------------------------------------------------
+
+# Discover versioned CUDA target dirs (e.g. cuda-12.6/targets/aarch64-linux)
+# so we don't hard-code the CUDA version or architecture.
+file(GLOB _cuda_inc_hints
+  "/usr/local/cuda/targets/*/include"
+  "/usr/local/cuda-*/targets/*/include"
+  "/usr/local/cuda/include")
+file(GLOB _cuda_lib_hints
+  "/usr/local/cuda/targets/*/lib"
+  "/usr/local/cuda-*/targets/*/lib"
+  "/usr/local/cuda/lib64")
+
+# These are CACHE variables — unset them so each configure re-evaluates
+# (prevents stale NOTFOUND values from a prior failed configure).
+unset(CUDA_INCLUDE_DIR CACHE)
+unset(NVJPEG_LIB CACHE)
+unset(CUDART_LIB CACHE)
+
+find_path(CUDA_INCLUDE_DIR cuda_runtime.h
+  HINTS ${_cuda_inc_hints} ENV CUDA_PATH
+  PATHS /usr/local/cuda/include /usr/include
+  NO_DEFAULT_PATH)
+
+find_library(NVJPEG_LIB nvjpeg
+  HINTS ${_cuda_lib_hints} ENV CUDA_PATH
+  PATHS /usr/local/cuda/lib64 /usr/lib/aarch64-linux-gnu/nvidia /usr/lib/aarch64-linux-gnu
+  NO_DEFAULT_PATH)
+
+find_library(CUDART_LIB cudart
+  HINTS ${_cuda_lib_hints} ENV CUDA_PATH
+  PATHS /usr/local/cuda/lib64 /usr/lib/aarch64-linux-gnu
+  NO_DEFAULT_PATH)
+
+if(CUDA_INCLUDE_DIR AND NVJPEG_LIB AND CUDART_LIB)
+  message(STATUS "nvJPEG hardware JPEG encoding enabled")
+  message(STATUS "  cuda headers : ${CUDA_INCLUDE_DIR}")
+  message(STATUS "  libnvjpeg    : ${NVJPEG_LIB}")
+  message(STATUS "  libcudart    : ${CUDART_LIB}")
+  target_compile_definitions(${target_name} PRIVATE HAS_CUDA)
+  target_include_directories(${target_name} PRIVATE ${CUDA_INCLUDE_DIR})
+  target_link_libraries(${target_name} ${NVJPEG_LIB} ${CUDART_LIB})
+  target_sources(${target_name} PRIVATE src/nvjpeg_encoder.cpp)
+else()
+  message(STATUS "nvJPEG not available — software JPEG encoding (cv::imencode)")
+  if(NOT CUDA_INCLUDE_DIR)
+    message(STATUS "  missing: cuda_runtime.h  →  sudo apt install cuda-cudart-dev-12-6")
+  endif()
+  if(NOT NVJPEG_LIB)
+    message(STATUS "  missing: libnvjpeg.so    →  sudo apt install libnvjpeg-dev-12-6")
+  endif()
+  if(NOT CUDART_LIB)
+    message(STATUS "  missing: libcudart.so    →  sudo apt install cuda-cudart-dev-12-6")
+  endif()
+endif()
 
 # MV EXEC to lib dir
 install(TARGETS

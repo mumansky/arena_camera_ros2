@@ -153,6 +153,13 @@
     # Computed from Stokes parameters: AoLP = 0.5 * atan2(S2, S1)
     publish_aolp: true
     
+    # Processing Profiler
+    # -------------------
+    # Log per-frame timing breakdown for each processing stage.
+    # Useful for identifying bottlenecks. Adds negligible overhead (~microseconds).
+    # Output is at DEBUG log level — set ros2 log level to DEBUG to see it.
+    profile_processing: true
+
     # Debug Display Window
     # --------------------
     # Show a tiled OpenCV window with all polarization channels, max-combined,
@@ -168,6 +175,14 @@
     # Default: 80 (good balance of quality and performance)
     # Recommended range: 50-90
     jpeg_quality: 50
+
+    # GPU Acceleration
+    # ----------------
+    # Controls whether nvJPEG hardware JPEG encoding is used (Orin/Jetson only).
+    # "auto" (default): use GPU if CUDA and nvJPEG are available, otherwise CPU
+    # "gpu":  force GPU — logs a warning and falls back if nvJPEG init fails
+    # "cpu":  always use cv::imencode (useful for profiling comparisons)
+    gpu_acceleration: "auto"
 
     # Watchdog / Heartbeat
     # --------------------
