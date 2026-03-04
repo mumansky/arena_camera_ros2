@@ -1,0 +1,20 @@
+# Build artifacts — exclude to keep context small and avoid stale binaries
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Git history not needed in build context
+.git/
+.gitignore
+
+# Documentation
+docs/
+*.md
+
+# Claude plans/memory
+.claude/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo

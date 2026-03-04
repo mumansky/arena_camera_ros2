@@ -1,0 +1,84 @@
+# Multi-stage build for ARM64 (aarch64) — targets NVIDIA Orin NX / JetPack
+#
+# Build with:
+#   ./docker/build.sh arm64
+#
+# Or manually (requires Docker BuildKit):
+#   docker buildx build \
+#     --platform linux/arm64 \
+#     --build-context sdk=/opt/ArenaSDK_Linux_ARM64 \
+#     -t arena_camera_node:arm64 \
+#     -f docker/Dockerfile.arm64 .
+#
+# On an x86-64 host, ARM64 containers run via QEMU binfmt emulation (slow but correct).
+# See docs/orin-deployment.md for prerequisites.
+
+# ─── Builder stage ────────────────────────────────────────────────────────────
+FROM --platform=linux/arm64 ros:humble-ros-base AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3-colcon-common-extensions \
+      libopencv-dev \
+      libyaml-cpp-dev \
+      ros-humble-diagnostic-updater \
+    && rm -rf /var/lib/apt/lists/*
+
+# ArenaSDK ARM64 — provided via --build-context sdk=/opt/ArenaSDK_Linux_ARM64
+# Only the subdirs needed for compilation are copied; the full SDK stays on the host.
+COPY --from=sdk /include /opt/ArenaSDK/include
+COPY --from=sdk /lib     /opt/ArenaSDK/lib
+COPY --from=sdk /GenICam /opt/ArenaSDK/GenICam
+COPY --from=sdk /ffmpeg  /opt/ArenaSDK/ffmpeg
+
+# Register SDK library paths so cmake/Findarena_sdk.cmake can find them
+RUN printf '/opt/ArenaSDK/lib\n/opt/ArenaSDK/GenICam/library/lib/Linux64_ARM\n/opt/ArenaSDK/ffmpeg\n' \
+      > /etc/ld.so.conf.d/Arena_SDK.conf \
+    && ldconfig
+
+# Build the ROS2 workspace
+WORKDIR /ws
+COPY ros2_ws/src src/
+RUN . /opt/ros/humble/setup.sh \
+    && colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release \
+    && rm -rf build log
+
+# ─── Runtime stage ────────────────────────────────────────────────────────────
+FROM --platform=linux/arm64 ros:humble-ros-base AS runtime
+
+# Minimal runtime dependencies (no -dev packages)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libopencv-core4.5d \
+      libopencv-imgproc4.5d \
+      libopencv-imgcodecs4.5d \
+      libopencv-highgui4.5d \
+      libopencv-calib3d4.5d \
+      libopencv-features2d4.5d \
+      libopencv-flann4.5d \
+      libyaml-cpp0.7 \
+      ros-humble-diagnostic-updater \
+      libibverbs1 \
+      librdmacm1 \
+      libnuma1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy only the runtime SDK libraries (not headers or build tools)
+COPY --from=builder /opt/ArenaSDK/lib \
+                    /opt/ArenaSDK/lib
+COPY --from=builder /opt/ArenaSDK/GenICam/library/lib/Linux64_ARM \
+                    /opt/ArenaSDK/GenICam/library/lib/Linux64_ARM
+COPY --from=builder /opt/ArenaSDK/ffmpeg \
+                    /opt/ArenaSDK/ffmpeg
+COPY --from=builder /etc/ld.so.conf.d/Arena_SDK.conf \
+                    /etc/ld.so.conf.d/Arena_SDK.conf
+RUN ldconfig
+
+# Copy built node and default config
+COPY --from=builder /ws/install /ws/install
+COPY etc/arena_camera/camera.yaml /etc/arena_camera/camera.yaml
+
+# Source ROS2 + workspace, then launch the node
+CMD ["/bin/bash", "-c", \
+    ". /opt/ros/humble/setup.sh \
+     && . /ws/install/setup.sh \
+     && exec ros2 run arena_camera_node start \
+          --ros-args --params-file /etc/arena_camera/camera.yaml"]

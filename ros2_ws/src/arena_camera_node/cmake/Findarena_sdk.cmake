@@ -124,7 +124,7 @@ if(EXISTS ${_arena_sdk_conf})
 		${arena_sdk_installation_root}/lib/libarena.so
 		${arena_sdk_installation_root}/lib/libsave.so
 		${arena_sdk_installation_root}/lib/libgentl.so
-		#${arena_sdk_installation_root}/lib/liblucidlog.so
+		${arena_sdk_installation_root}/lib/liblucidlog.so
 
 		## debug
 		#${arena_sdk_installation_root}/lib/libarenad.so

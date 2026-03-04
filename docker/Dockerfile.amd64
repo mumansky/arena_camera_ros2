@@ -1,0 +1,91 @@
+# Multi-stage build for x86-64 (amd64) — targets development machine / CI
+#
+# Build with:
+#   ./docker/build.sh amd64
+#
+# Or manually (requires Docker BuildKit):
+#   docker buildx build \
+#     --platform linux/amd64 \
+#     --build-context sdk=/opt/ArenaSDK_Linux_x64 \
+#     -t arena_camera_node:amd64 \
+#     -f docker/Dockerfile.amd64 .
+#
+# Note: lib64/ (~1.3GB) + Metavision/lib (~120MB) are needed due to libgentl.so
+# having a hard dependency on Metavision. The runtime stage is much smaller.
+
+# ─── Builder stage ────────────────────────────────────────────────────────────
+FROM ros:humble-ros-base AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3-colcon-common-extensions \
+      libopencv-dev \
+      libyaml-cpp-dev \
+      ros-humble-diagnostic-updater \
+    && rm -rf /var/lib/apt/lists/*
+
+# ArenaSDK x64 — provided via --build-context sdk=/opt/ArenaSDK_Linux_x64
+# libgentl.so has a hard link-time dependency on Metavision SDK, so that must
+# be included too. Qt/OpenCV/Examples are excluded as they are not needed.
+COPY --from=sdk /include          /opt/ArenaSDK/include
+COPY --from=sdk /lib64            /opt/ArenaSDK/lib64
+COPY --from=sdk /GenICam          /opt/ArenaSDK/GenICam
+COPY --from=sdk /ffmpeg           /opt/ArenaSDK/ffmpeg
+COPY --from=sdk /Metavision/lib   /opt/ArenaSDK/Metavision/lib
+COPY --from=sdk /OpenCV/lib       /opt/ArenaSDK/OpenCV/lib
+
+# Register SDK library paths so cmake/Findarena_sdk.cmake can find them
+RUN printf '/opt/ArenaSDK/lib64\n/opt/ArenaSDK/GenICam/library/lib/Linux64_x64\n/opt/ArenaSDK/ffmpeg\n/opt/ArenaSDK/Metavision/lib\n/opt/ArenaSDK/OpenCV/lib\n' \
+      > /etc/ld.so.conf.d/Arena_SDK.conf \
+    && ldconfig
+
+# Build the ROS2 workspace
+WORKDIR /ws
+COPY ros2_ws/src src/
+RUN . /opt/ros/humble/setup.sh \
+    && colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release \
+    && rm -rf build log
+
+# ─── Runtime stage ────────────────────────────────────────────────────────────
+FROM ros:humble-ros-base AS runtime
+
+# Minimal runtime dependencies (no -dev packages)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libopencv-core4.5d \
+      libopencv-imgproc4.5d \
+      libopencv-imgcodecs4.5d \
+      libopencv-highgui4.5d \
+      libopencv-calib3d4.5d \
+      libopencv-features2d4.5d \
+      libopencv-flann4.5d \
+      libyaml-cpp0.7 \
+      ros-humble-diagnostic-updater \
+      libibverbs1 \
+      librdmacm1 \
+      libnuma1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy only the runtime SDK libraries (not headers or build tools)
+COPY --from=builder /opt/ArenaSDK/lib64 \
+                    /opt/ArenaSDK/lib64
+COPY --from=builder /opt/ArenaSDK/GenICam/library/lib/Linux64_x64 \
+                    /opt/ArenaSDK/GenICam/library/lib/Linux64_x64
+COPY --from=builder /opt/ArenaSDK/ffmpeg \
+                    /opt/ArenaSDK/ffmpeg
+COPY --from=builder /opt/ArenaSDK/Metavision/lib \
+                    /opt/ArenaSDK/Metavision/lib
+COPY --from=builder /opt/ArenaSDK/OpenCV/lib \
+                    /opt/ArenaSDK/OpenCV/lib
+COPY --from=builder /etc/ld.so.conf.d/Arena_SDK.conf \
+                    /etc/ld.so.conf.d/Arena_SDK.conf
+RUN ldconfig
+
+# Copy built node and default config
+COPY --from=builder /ws/install /ws/install
+COPY etc/arena_camera/camera.yaml /etc/arena_camera/camera.yaml
+
+# Source ROS2 + workspace, then launch the node
+CMD ["/bin/bash", "-c", \
+    ". /opt/ros/humble/setup.sh \
+     && . /ws/install/setup.sh \
+     && exec ros2 run arena_camera_node start \
+          --ros-args --params-file /etc/arena_camera/camera.yaml"]

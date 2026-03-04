@@ -86,7 +86,29 @@ auto-detect the SDK root — the install script must write the correct paths to 
 
 ## Step 4 — Build on the Orin
 
-Build natively on the Orin (no cross-compilation needed; Orin NX is fast enough):
+### Option A: Docker (recommended — test on x86 first, then deploy to Orin)
+
+The repo includes a multi-arch Docker build system. Build and smoke-test the ARM64
+image on your x86 dev machine before touching the Orin:
+
+```bash
+# One-time setup on x86 dev machine:
+sudo apt install docker.io qemu-user-static binfmt-support
+sudo usermod -aG docker $USER   # log out/in after
+docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
+# Build ARM64 image (runs via QEMU on x86):
+./docker/build.sh arm64
+
+# Smoke test — node starts, polls for camera, Ctrl+C to stop:
+docker run --rm -it --network host arena_camera_node:arm64
+```
+
+To deploy on the Orin: install Docker on the Orin, copy the image (`docker save/load`
+or push to a registry), then run it with `--network host` so the node can reach the
+camera and publish ROS2 topics.
+
+### Option B: Native build on the Orin
 
 ```bash
 cd ~/arena_camera_ros2/ros2_ws
