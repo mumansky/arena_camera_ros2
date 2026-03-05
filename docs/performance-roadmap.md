@@ -14,170 +14,165 @@ worker finishes.
 - **All topics remain configurable** — user is still experimenting with which to enable
 - **Cross-platform:** Must build and run on x86 laptops (no GPU) and NVIDIA Orin (with GPU)
 
-## What We're Implementing Now
+---
 
-**Phase 1 only:** Profiling instrumentation + the duplicate BGR8 quick fix (since it's an obvious
-bug regardless of profiling results). GPU acceleration deferred until real timing data drives the decision.
+## Real Profiling Data
+
+### Baseline (before any optimization)
+
+```
+split=6ms  bgr=76ms  max=14ms  dolp_aolp=61ms  TOTAL=158ms  (~6.3 FPS)
+dolp_aolp breakdown: stokes_conv=7ms stokes=5ms dolp=28ms aolp=21ms
+```
+
+### After Phase 1–3 (profiling + duplicate BGR fix + AoLP vectorization)
+
+```
+split=6ms  channels=76ms  max=14ms  dolp_aolp=61ms  TOTAL=158ms
+dolp_aolp: stokes_conv=7ms stokes=5ms dolp=28ms aolp=21ms
+```
+*(profiling instrumentation only — no measurable improvement from Phase 2/3 alone at this point)*
+
+### After Part B: nvJPEG GPU encoding (cuda-cudart-dev-12-6 + libnvjpeg-dev-12-6 + cuda-crt-12-6)
+
+```
+split=6ms  channels=51ms  max=8ms  dolp_aolp=55ms  TOTAL=120ms  (~8.3 FPS)
+```
+channels drop: Arena SDK debayer unchanged, but JPEG encodes now GPU. max improved.
+
+### After CUDA fused Stokes+DOLP+AoLP kernel (BGR input — first attempt)
+
+```
+split=6ms  channels=51ms  max=13ms  dolp_aolp=38ms  TOTAL=108ms  (~9.3 FPS)
+dolp_aolp: stokes_conv=32ms (BGR→gray upload) stokes=0ms dolp=0ms aolp=0ms
+```
+Kernel active but dominated by BGR→gray CPU loop + H2D upload.
+
+### After profiling sub-breakdown (ch_debayer vs ch_jpeg separated)
+
+```
+split=6ms  ch_debayer=32ms  ch_jpeg=19ms  max=11ms  dolp_aolp=38ms  TOTAL=106ms
+dolp_aolp: stokes_conv=32ms stokes=0ms dolp=0ms aolp=0ms
+```
+
+### After CUDA kernel: raw mono8 input (skip BGR→gray entirely) ← CURRENT
+
+```
+split=10ms  ch_debayer=40ms  ch_jpeg=19ms  max=12ms  dolp_aolp=10ms  TOTAL=92ms  (~10.9 FPS ✓)
+dolp_aolp: stokes_conv=3ms stokes=0ms dolp=0ms aolp=0ms
+```
+**Target met: TOTAL < 100ms, 10 FPS sustained.**
 
 ---
 
-## Phase 1: Profiling Instrumentation (Implement Now)
-
-Add permanent per-stage timing to `process_copied_image_()` and `compute_and_publish_dolp_aolp_()`,
-gated by a YAML config toggle.
-
-### New YAML parameter
-
-```yaml
-# Processing Profiler
-# -------------------
-# Log per-frame timing breakdown for each processing stage.
-# Useful for identifying bottlenecks. Adds negligible overhead (~microseconds).
-profile_processing: false
-```
-
-**Files modified:**
-- `ArenaCameraNode.h` — add `bool profile_processing_` member
-- `ArenaCameraNode.cpp` — parse parameter in `parse_parameters_()`, add timing around each stage
-
-### Stages to instrument
-
-| Stage | Location (ArenaCameraNode.cpp) | Description |
-|-------|-------------------------------|-------------|
-| `split` | L1032-1033 | `ImageFactory::SplitChannels()` |
-| `bgr` | L1053-1055 | 4x `ImageFactory::Convert(BayerRG8→BGR8)` |
-| `ch_raw` | L1065-1077 | 4x raw channel memcpy + publish |
-| `ch_jpeg` | L1078-1087 | 4x `cv::imencode(".jpg")` |
-| `max_bgr` | L1091-1098 | 4x DUPLICATE BGR8 conversion (bug — Phase 2 removes this) |
-| `max` | L1109-1112 | `cv::max()` cascade |
-| `max_pub` | L1115-1135 | Max raw + JPEG publish |
-| `stokes_conv` | L789-818 | 4x Mono8 convert + float32 convert |
-| `stokes` | L820-823 | S0, S1, S2 matrix operations |
-| `dolp` | L827-869 | DOLP compute + publish (raw + JPEG) |
-| `aolp` | L877-915 | AoLP compute + publish (raw + JPEG) |
-
-### Log output format (DEBUG level, one line per frame)
+## Packages Installed on Orin
 
 ```
-[DEBUG] Frame 42 timing (ms): split=8.2 bgr=32.1 ch_jpeg=24.5 max_bgr=31.8 max=3.1 stokes_conv=17.5 stokes=1.2 dolp=24.4 aolp=28.6 TOTAL=171.4
+sudo apt install cuda-cudart-dev-12-6 libnvjpeg-dev-12-6 cuda-crt-12-6 cuda-nvcc-12-6
 ```
 
-### Implementation approach
+nvcc path: `/usr/local/cuda-12.6/bin/nvcc` (added to `~/.bashrc` PATH).
 
-Use a lightweight helper to avoid cluttering the processing code:
-
-```cpp
-// In process_copied_image_() and compute_and_publish_dolp_aolp_():
-struct StageTimer {
-  std::chrono::steady_clock::time_point start;
-  std::vector<std::pair<std::string, double>>& stages;
-  bool enabled;
-  void mark(const std::string& name) { /* record elapsed since last mark */ }
-};
+Build command:
+```bash
+cd ros2_ws && PATH="/usr/local/cuda-12.6/bin:$PATH" colcon build --packages-select arena_camera_node
 ```
 
 ---
 
-## Phase 2: Fix Duplicate BGR8 Conversion (Implement Now)
+## Optimizations Implemented
 
-**Bug:** The max-combined image reconverts all 4 channels from Bayer→BGR8 (lines 1091-1098)
-even though the per-channel loop already converted them (lines 1054-1055). This wastes ~30ms.
+### Phase 1: StageAccumulator profiling (DONE)
+Per-frame timing at DEBUG level, 30-frame averages at INFO level.
+`profile_processing: true` in camera.yaml to enable.
 
-**Fix:** Cache the BGR8 `cv::Mat` data from the per-channel loop in an array, reuse for
-max-combined. No new dependencies, no behavior change.
+### Phase 2: Eliminate duplicate BGR8 conversion (DONE)
+`cached_bgr[4]` array reuses per-channel BGR mats for max-combined image.
+Saved ~30ms at the time.
 
-**File:** `ArenaCameraNode.cpp` lines 1036, 1053-1063, 1090-1112
+### Phase 3: Vectorize AoLP with cv::phase() (DONE)
+ARM NEON SIMD via `cv::phase(S1, S2)`. Replaced scalar `std::atan2` loop.
 
----
+### Part A: Eliminate 4x duplicate Arena SDK Mono8 conversions (DONE)
+`compute_and_publish_dolp_aolp_()` now derives gray via `cv::cvtColor(BGR2GRAY)`
+from `cached_bgr` instead of calling `ImageFactory::Convert(→Mono8)` 4 more times.
 
-## Future Phases (Deferred — Implement After Profiling Data)
+### Part B: nvJPEG GPU encoding (DONE)
+- `src/nvjpeg_encoder.h/.cpp` — `NvJpegEncoder` wrapper class
+- `jpeg_encode_()` helper replaces all 7 `cv::imencode` calls
+- CMakeLists.txt glob-based path detection for CUDA headers/libs
+- Mono8 uses `nvjpegEncodeYUV(NVJPEG_CSS_GRAY)` — `NVJPEG_INPUT_Y` doesn't exist in this version
+- Saved ~30ms on channels, ~8ms on max/dolp/aolp JPEG encodes
 
-### Phase 3: Vectorize AoLP Loop
-
-The AoLP computation (line 885-890) uses a scalar per-pixel `std::atan2` loop. Replace with
-`cv::phase(S2, S1, angle)` which uses SIMD (ARM NEON on Orin, SSE on x86). Trivial change,
-estimated ~10-20ms savings.
-
-**File:** `ArenaCameraNode.cpp` lines 877-890
-
-### Phase 4: GPU Acceleration (CUDA)
-
-Only pursue if profiling shows CPU optimizations can't hit 10 FPS target.
-
-#### Cross-Platform Strategy
-
-**Compile-time (CMakeLists.txt):** Auto-detect CUDA via `check_language(CUDA)`. No `nvcc`
-on x86 → CUDA code not compiled. No manual flags needed.
-
-```cmake
-include(CheckLanguage)
-check_language(CUDA)
-if(CMAKE_CUDA_COMPILER)
-  enable_language(CUDA)
-  find_package(CUDAToolkit QUIET)
-  if(CUDAToolkit_FOUND)
-    add_definitions(-DHAS_CUDA)
-  endif()
-endif()
-```
-
-**Runtime (camera.yaml):**
-
-```yaml
-# GPU Acceleration
-# ----------------
-# Controls whether GPU (CUDA) is used for image processing.
-#   "auto"  (default): Use GPU if available, fall back to CPU
-#   "gpu":  Force GPU — error if unavailable
-#   "cpu":  Force CPU — ignore GPU even if present
-gpu_acceleration: "auto"
-```
-
-**Runtime dispatch:** `m_use_gpu_` bool gates GPU code paths. CPU path is always the
-existing (Phase 2-3 optimized) OpenCV code. `#ifdef HAS_CUDA` guards compilation.
-
-#### 4a: Fused CUDA Kernel for Stokes + DOLP + AoLP
-
-Single kernel: 4x Mono8 input → dolp_u8 + aolp_u8 output. Eliminates ~10 intermediate
-cv::Mat allocations and fuses ~8 sequential operations.
-
-**New file:** `src/cuda/polarization_kernels.cu/.h`
-
-#### 4b: nvJPEG Hardware Encoding
-
-Replace `cv::imencode(".jpg")` with `nvjpegEncode()` for all 6+ JPEG compressions per frame.
-
-**New file:** `src/cuda/nvjpeg_encoder.cpp/.h`
-
-#### 4c: GPU Debayering (conditional on profiling)
-
-Only if `ImageFactory::Convert(BayerRG8→BGR8)` is a major bottleneck (>30ms).
-
-### Phase 5: Pipeline Parallelism
-
-Overlap CPU publishing with async GPU computation. Only relevant after Phase 4.
+### Part C: CUDA fused Stokes+DOLP+AoLP kernel (DONE)
+- `src/polarization_kernels.h/.cu` — kernel takes 4 raw mono8 planes directly
+- Each thread: reads 4 channel bytes → Stokes → DOLP + AoLP → writes 2 output bytes
+- Input: `channels[i]->GetData()` from Arena SplitChannels (BayerRG8, one byte per pixel)
+- No BGR→gray conversion needed — raw luminance values feed Stokes math directly
+- Pinned host staging buffer for fast H2D transfer
+- `HAS_POLAR_KERNEL` define gates GPU path; CPU fallback always available
+- `use_gpu_polar_` runtime flag; falls back to CPU on any kernel error
+- Saved ~48ms on dolp_aolp (38ms → 10ms)
 
 ---
 
-## Expected Impact Estimates
+## Current Bottlenecks (as of TOTAL ~92ms)
+
+| Stage | Time | Notes |
+|-------|------|-------|
+| split | 10ms | `ImageFactory::SplitChannels()` — Arena SDK, hard to replace |
+| ch_debayer | 40ms | 4× `ImageFactory::Convert(BayerRG8→BGR8)` — CPU, ~10ms each |
+| ch_jpeg | 19ms | 4× nvJPEG BGR encode — sequential (single nvJPEG stream) |
+| max | 12ms | `cv::max` cascade + 1× nvJPEG BGR encode |
+| dolp_aolp | 10ms | GPU kernel (3ms) + 2× nvJPEG mono8 encode (~7ms) |
+
+The `ch_debayer=40ms` is the dominant remaining bottleneck. It's the Arena SDK CPU Bayer→BGR
+debayer, required for the per-channel JPEG topic output. Options to attack it:
+
+---
+
+## Remaining Optimization Options
+
+### Option 1: CUDA Bayer debayering (est. -20ms)
+Replace `ImageFactory::Convert(BayerRG8→BGR8)` with a CUDA Bayer→BGR kernel.
+Each channel's BayerRG8 data is already available as `channels[i]->GetData()`.
+Output feeds directly into nvJPEG for GPU-to-GPU encode (avoiding a round-trip to host).
+Risk: Bayer demosaicing quality may differ from Arena SDK (bilinear vs higher-order).
+
+### Option 2: Disable per-channel BGR topics (est. -40ms if ch_debayer + ch_jpeg eliminated)
+If the 4× per-channel compressed images aren't needed, disabling them eliminates
+both `ch_debayer` and `ch_jpeg` entirely. The raw mono8 data feeds the CUDA kernel
+already — no debayer needed for DOLP/AoLP.
+Set `publish_compressed: false` or add per-topic enable flags.
+
+### Option 3: Async GPU pipeline (est. -10ms)
+Overlap ch_debayer (CPU) with dolp_aolp GPU kernel using separate CUDA streams.
+Currently sequential: debayer → ch_jpeg → kernel → dolp_jpeg.
+With async: debayer CPU work runs while kernel executes on GPU simultaneously.
+
+### Option 4: nvJPEG batch encoding (est. -5ms on ch_jpeg)
+Use `nvjpegEncodeBatched()` to encode all 4 BGR channels in one GPU launch instead
+of 4 sequential single-image encodes. Reduces CUDA launch overhead.
+
+---
+
+## Expected Impact Estimates (remaining)
 
 | Optimization | Est. Savings | Est. Frame Time |
 |-------------|-------------|-----------------|
-| Baseline (current) | — | ~170ms (~5.9 FPS) |
-| Fix duplicate BGR8 (Phase 2) | ~30ms | ~140ms (~7.1 FPS) |
-| Vectorize AoLP (Phase 3) | ~15ms | ~125ms (~8.0 FPS) |
-| CUDA Stokes+DOLP+AoLP (Phase 4a) | ~50ms | ~75ms (~13.3 FPS) |
-| nvJPEG (Phase 4b) | ~20ms | ~55ms (~18.2 FPS) |
-| Pipeline overlap (Phase 5) | ~15ms | ~40ms (~25 FPS) |
-
-*Estimates to be validated by Phase 1 profiling data.*
+| Current (after Part C) | — | ~92ms (~10.9 FPS ✓) |
+| CUDA Bayer debayer (Option 1) | ~20ms | ~72ms (~13.9 FPS) |
+| Disable ch topics (Option 2) | ~40ms | ~52ms (~19.2 FPS) |
+| Async GPU pipeline (Option 3) | ~10ms | ~62ms (~16.1 FPS) |
+| nvJPEG batch (Option 4) | ~5ms | ~87ms (~11.5 FPS) |
 
 ---
 
 ## Verification
 
-1. Build and pass all tests: `./build_and_test.sh`
+1. Build: `PATH="/usr/local/cuda-12.6/bin:$PATH" colcon build --packages-select arena_camera_node`
 2. Run node with `profile_processing: true`, collect per-stage timing at 10 FPS
-3. Confirm backpressure drop count decreases after Phase 2 fix
-4. Check diagnostics for `Last Processing Time (ms)` and `Avg Processing Time (ms)`
-5. **x86 laptop:** Builds cleanly without CUDA, `profile_processing` works identically
+3. Startup log should show:
+   - `nvJPEG hardware JPEG encoding enabled (GPU)`
+   - `CUDA polarization kernel enabled (fused Stokes+DOLP+AoLP)`
+4. **x86 laptop:** Builds cleanly without CUDA, CPU path active, `profile_processing` works identically

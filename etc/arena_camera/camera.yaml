@@ -144,6 +144,14 @@
     # Compressed images are published to <topic>/compressed
     # For polarized cameras, applies to both main topic and /pol_0deg channel
     
+    # Polarization Channel Topics (polarized cameras only)
+    # -----------------------------------------------------
+    # Publish the 4 per-angle BGR images (0°, 45°, 90°, 135°) and the max-combined image.
+    # Disabling these skips the 4x Arena SDK Bayer→BGR debayer (~40ms) and 4x JPEG encodes
+    # (~19ms), saving ~59ms of frame time. DOLP/AoLP are unaffected — they use raw data.
+    publish_pol_channels: false   # /pol_0deg, /pol_45deg, /pol_90deg, /pol_135deg
+    publish_pol_max: true        # /pol_max (pixel-wise max of all 4 channels)
+
     # Polarization Analysis Topics (polarized cameras only)
     # ---------------------------------------------------
     # Degree of Linear Polarization (DOLP): mono8 image where 0=unpolarized, 255=fully polarized

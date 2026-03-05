@@ -157,10 +157,11 @@ target_link_libraries(${target_name} yaml-cpp)
 target_link_libraries(${target_name} ${OpenCV_LIBS})
 
 # --------------------------------------------------------------------------
-# Optional: CUDA / nvJPEG hardware JPEG encoding (Orin/Jetson)
+# Optional: CUDA — nvJPEG hardware JPEG encoding + fused polarization kernel
 # nvjpeg_encoder.cpp is pure C++ — no nvcc needed.
+# polarization_kernels.cu requires nvcc (CUDA language).
 # On JetPack, headers land in /usr/local/cuda-<ver>/targets/<arch>/include/
-# after: sudo apt install cuda-cudart-dev-12-6 libnvjpeg-dev-12-6
+# after: sudo apt install cuda-cudart-dev-12-6 libnvjpeg-dev-12-6 cuda-crt-12-6
 # Gracefully skipped on x86 hosts that don't have CUDA installed.
 # --------------------------------------------------------------------------
 
@@ -205,8 +206,27 @@ if(CUDA_INCLUDE_DIR AND NVJPEG_LIB AND CUDART_LIB)
   target_include_directories(${target_name} PRIVATE ${CUDA_INCLUDE_DIR})
   target_link_libraries(${target_name} ${NVJPEG_LIB} ${CUDART_LIB})
   target_sources(${target_name} PRIVATE src/nvjpeg_encoder.cpp)
+
+  # Fused polarization kernel — requires nvcc
+  include(CheckLanguage)
+  check_language(CUDA)
+  if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+    # Orin is SM 8.7; allow override via -DCMAKE_CUDA_ARCHITECTURES=<arch>
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+      set(CMAKE_CUDA_ARCHITECTURES 87)
+    endif()
+    message(STATUS "CUDA polarization kernel enabled (SM ${CMAKE_CUDA_ARCHITECTURES})")
+    target_sources(${target_name} PRIVATE src/polarization_kernels.cu)
+    set_source_files_properties(src/polarization_kernels.cu
+      PROPERTIES COMPILE_OPTIONS "--expt-relaxed-constexpr")
+    set_target_properties(${target_name} PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+    target_compile_definitions(${target_name} PRIVATE HAS_POLAR_KERNEL)
+  else()
+    message(STATUS "nvcc not found — polarization kernel disabled (CPU fallback active)")
+  endif()
 else()
-  message(STATUS "nvJPEG not available — software JPEG encoding (cv::imencode)")
+  message(STATUS "nvJPEG not available — software JPEG encoding + CPU polarization (cv::imencode)")
   if(NOT CUDA_INCLUDE_DIR)
     message(STATUS "  missing: cuda_runtime.h  →  sudo apt install cuda-cudart-dev-12-6")
   endif()

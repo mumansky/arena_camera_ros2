@@ -42,9 +42,12 @@
 // OpenCV (for cv::Mat in compute_and_publish_dolp_aolp_ signature)
 #include <opencv2/core.hpp>
 
-// Optional nvJPEG hardware JPEG encoder (Orin/Jetson; no-op on x86 without CUDA)
+// Optional CUDA extensions (Orin/Jetson; no-op on x86 without CUDA)
 #ifdef HAS_CUDA
 #include "nvjpeg_encoder.h"
+#endif
+#ifdef HAS_POLAR_KERNEL
+#include "polarization_kernels.h"
 #endif
 
 class ArenaCameraNode : public rclcpp::Node
@@ -331,6 +334,8 @@ class ArenaCameraNode : public rclcpp::Node
 
   bool publish_raw_;
   bool publish_compressed_;
+  bool publish_pol_channels_;  // Publish 4 per-angle BGR channel images (0/45/90/135 deg)
+  bool publish_pol_max_;       // Publish max-combined polarization image
   bool publish_dolp_;
   bool publish_aolp_;
   
@@ -343,8 +348,12 @@ class ArenaCameraNode : public rclcpp::Node
   bool profile_processing_;  // Log per-frame timing breakdown for each processing stage
   std::string gpu_acceleration_;  // "auto" | "gpu" | "cpu" (from camera.yaml)
   bool use_gpu_jpeg_{false};      // Runtime: true when nvJPEG encoder is active
+  bool use_gpu_polar_{false};     // Runtime: true when CUDA polarization kernel is active
 #ifdef HAS_CUDA
   std::unique_ptr<NvJpegEncoder> nvjpeg_encoder_;
+#endif
+#ifdef HAS_POLAR_KERNEL
+  PolarKernelBuffers polar_bufs_;
 #endif
   
   // Watchdog settings (Task 20)
@@ -401,14 +410,17 @@ class ArenaCameraNode : public rclcpp::Node
   // Uses nvJPEG hardware encoder when available; falls back to cv::imencode.
   void jpeg_encode_(const cv::Mat& img, std::vector<uint8_t>& out);
 
-  // Shared helper: compute DOLP and AoLP from 4 pre-converted BGR mats and publish.
-  // cached_bgr[4] must be non-empty CV_8UC3 mats (reused from per-channel conversion).
-  // Derives grayscale intensity via cvtColor(BGR→GRAY) to avoid a duplicate Arena SDK
-  // Bayer→Mono8 conversion pass.
+  // Shared helper: compute DOLP and AoLP and publish.
+  // cached_bgr[4]: CV_8UC3 mats from per-channel Bayer→BGR conversion (CPU fallback).
+  // raw_ch[4]:     raw mono8 channel pointers from SplitChannels (w*h bytes each,
+  //                contiguous). Used by the GPU path to skip the BGR→gray step entirely.
+  //                Pass nullptr on each entry to force CPU path for that frame.
   // out_dolp / out_aolp (optional) receive clones of the computed images for display.
   void compute_and_publish_dolp_aolp_(
       Arena::IImage* pImage,
       const cv::Mat cached_bgr[4],
+      const uint8_t* const raw_ch[4],
+      int raw_w, int raw_h,
       cv::Mat* out_dolp = nullptr,
       cv::Mat* out_aolp = nullptr);
 };

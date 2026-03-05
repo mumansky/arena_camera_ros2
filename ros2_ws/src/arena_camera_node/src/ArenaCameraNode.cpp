@@ -51,6 +51,7 @@
 #include <filesystem> // directory creation for image saving
 #include <iomanip>    // put_time for session directory naming
 #include <sstream>    // ostringstream for diagnostics overlay
+#include <future>     // std::async for parallel channel debayer
 #include <yaml-cpp/yaml.h>  // YAML parsing
 
 // OpenCV
@@ -416,6 +417,12 @@ void ArenaCameraNode::parse_parameters_()
     currentParam = "publish_compressed";
     publish_compressed_ = config_bool(m_config_params_, "publish_compressed", false);
 
+    currentParam = "publish_pol_channels";
+    publish_pol_channels_ = config_bool(m_config_params_, "publish_pol_channels", true);
+
+    currentParam = "publish_pol_max";
+    publish_pol_max_ = config_bool(m_config_params_, "publish_pol_max", true);
+
     currentParam = "publish_dolp";
     publish_dolp_ = config_bool(m_config_params_, "publish_dolp", false);
 
@@ -564,8 +571,8 @@ void ArenaCameraNode::initialize_()
         topic_ + "/compressed", pub_qos_);
   }
   
-  // Create publishers for all polarization channels (if either raw or compressed is enabled)
-  if (publish_raw_ || publish_compressed_) {
+  // Create publishers for all polarization channels
+  if (publish_pol_channels_ && (publish_raw_ || publish_compressed_)) {
     m_pub_pol_0deg_ = this->create_publisher<sensor_msgs::msg::Image>(
         topic_ + "/pol_0deg", pub_qos_);
     m_pub_pol_45deg_ = this->create_publisher<sensor_msgs::msg::Image>(
@@ -575,9 +582,7 @@ void ArenaCameraNode::initialize_()
     m_pub_pol_135deg_ = this->create_publisher<sensor_msgs::msg::Image>(
         topic_ + "/pol_135deg", pub_qos_);
   }
-  
-  // Create compressed publishers for all polarization channels (only if compressed enabled)
-  if (publish_compressed_) {
+  if (publish_pol_channels_ && publish_compressed_) {
     m_pub_pol_0deg_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
         topic_ + "/pol_0deg/compressed", pub_qos_);
     m_pub_pol_45deg_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
@@ -587,13 +592,13 @@ void ArenaCameraNode::initialize_()
     m_pub_pol_135deg_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
         topic_ + "/pol_135deg/compressed", pub_qos_);
   }
-  
+
   // Create publishers for max-combined polarization image
-  if (publish_raw_ || publish_compressed_) {
+  if (publish_pol_max_ && (publish_raw_ || publish_compressed_)) {
     m_pub_pol_max_ = this->create_publisher<sensor_msgs::msg::Image>(
         topic_ + "/pol_max", pub_qos_);
   }
-  if (publish_compressed_) {
+  if (publish_pol_max_ && publish_compressed_) {
     m_pub_pol_max_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
         topic_ + "/pol_max/compressed", pub_qos_);
   }
@@ -658,8 +663,14 @@ void ArenaCameraNode::initialize_()
         nvjpeg_encoder_.reset();
         log_warn("nvJPEG init failed — falling back to cv::imencode");
       }
+#ifdef HAS_POLAR_KERNEL
+      // Polarization kernel buffers are allocated lazily on first frame;
+      // just mark the flag here so compute_and_publish_dolp_aolp_ uses GPU.
+      use_gpu_polar_ = true;
+      log_info("CUDA polarization kernel enabled (fused Stokes+DOLP+AoLP)");
+#endif
     } else {
-      log_info("No CUDA device found — using software JPEG encoding");
+      log_info("No CUDA device found — using software JPEG encoding + CPU polarization");
     }
   } else {
     log_info("gpu_acceleration=cpu — using software JPEG encoding");
@@ -921,137 +932,177 @@ struct StageTimer {
 void ArenaCameraNode::compute_and_publish_dolp_aolp_(
     Arena::IImage* pImage,
     const cv::Mat cached_bgr[4],
+    const uint8_t* const raw_ch[4],
+    int raw_w, int raw_h,
     cv::Mat* out_dolp,
     cv::Mat* out_aolp)
 {
   static StageAccumulator dolp_acc;
   StageTimer dtimer(profile_processing_, &dolp_acc);
 
-  // Derive grayscale intensity from the pre-converted BGR mats via cvtColor.
-  // This avoids a second round of 4x Arena::ImageFactory::Convert(→Mono8) calls
-  // (~12ms saved). cvtColor(BGR→GRAY) uses equal-weighted averaging which is
-  // consistent across all 4 channels, preserving DOLP/AoLP accuracy.
-  size_t stokes_h = cached_bgr[0].rows;
-  size_t stokes_w = cached_bgr[0].cols;
+  const size_t stokes_h = static_cast<size_t>(cached_bgr[0].rows);
+  const size_t stokes_w = static_cast<size_t>(cached_bgr[0].cols);
 
-  auto to_gray_float = [&](size_t idx) -> cv::Mat {
-    cv::Mat gray, gray_f;
-    cv::cvtColor(cached_bgr[idx], gray, cv::COLOR_BGR2GRAY);
-    gray.convertTo(gray_f, CV_32F);
-    return gray_f;
-  };
+  cv::Mat dolp_u8, aolp_u8;
 
-  cv::Mat f0   = to_gray_float(0);   // I_0°
-  cv::Mat f45  = to_gray_float(1);   // I_45°
-  cv::Mat f90  = to_gray_float(2);   // I_90°
-  cv::Mat f135 = to_gray_float(3);   // I_135°
-  dtimer.mark("stokes_conv");
+#ifdef HAS_POLAR_KERNEL
+  // --- GPU fast path: fused Stokes + DOLP + AoLP in one CUDA kernel ---
+  // Uses raw mono8 channel data directly — no BGR→gray conversion needed.
+  bool gpu_ok = false;
+  if (use_gpu_polar_ && (publish_dolp_ || publish_aolp_) &&
+      raw_ch[0] && raw_ch[1] && raw_ch[2] && raw_ch[3]) {
 
-  // Stokes parameters (vectorized OpenCV operations)
-  cv::Mat S0 = f0 + f90;       // Total intensity
-  cv::Mat S1 = f0 - f90;       // Horizontal vs vertical
-  cv::Mat S2 = f45 - f135;     // Diagonal
-  dtimer.mark("stokes");
+    dolp_u8.create(raw_h, raw_w, CV_8U);
+    aolp_u8.create(raw_h, raw_w, CV_8U);
 
-  // --- DOLP ---
-  if (publish_dolp_ && m_pub_dolp_) {
-    cv::Mat S1_sq, S2_sq, numerator, dolp_float;
-    cv::multiply(S1, S1, S1_sq);
-    cv::multiply(S2, S2, S2_sq);
-    cv::sqrt(S1_sq + S2_sq, numerator);
+    gpu_ok = polar_compute_gpu(
+      raw_ch, raw_w, raw_h,
+      dolp_u8.data, aolp_u8.data,
+      polar_bufs_);
 
-    // Safe division: clamp S0 to avoid division by zero
-    dolp_float = cv::Mat::zeros(stokes_h, stokes_w, CV_32F);
-    cv::Mat s0_safe;
-    cv::max(S0, 1e-5f, s0_safe);
-    cv::divide(numerator, s0_safe, dolp_float);
-    dolp_float.setTo(0.0f, S0 <= 1e-5f);  // Zero where S0 is negligible
-
-    // Clamp [0, 1] and scale to uint8 [0, 255]
-    cv::min(dolp_float, 1.0f, dolp_float);
-    cv::max(dolp_float, 0.0f, dolp_float);
-
-    cv::Mat dolp_u8;
-    dolp_float.convertTo(dolp_u8, CV_8U, 255.0);
-
-    if (out_dolp) *out_dolp = dolp_u8.clone();
-
-    // Publish raw DOLP (mono8)
-    {
-      auto msg = std::make_unique<sensor_msgs::msg::Image>();
-      fill_header_(msg->header, pImage);
-      msg->height = stokes_h;
-      msg->width = stokes_w;
-      msg->encoding = "mono8";
-      msg->is_bigendian = 0;
-      msg->step = stokes_w;
-      msg->data.assign(dolp_u8.data, dolp_u8.data + dolp_u8.total());
-      m_pub_dolp_->publish(std::move(msg));
+    if (!gpu_ok) {
+      log_warn("CUDA polarization kernel failed — falling back to CPU this frame");
     }
 
-    // Publish compressed DOLP
-    if (publish_compressed_ && m_pub_dolp_compressed_) {
-      auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-      fill_header_(msg->header, pImage);
-      msg->format = "jpeg";
-      jpeg_encode_(dolp_u8, msg->data);
-      m_pub_dolp_compressed_->publish(std::move(msg));
-    }
+    // stokes_conv captures full upload+kernel+download; stokes/dolp/aolp are zero.
+    dtimer.mark("stokes_conv");
+    dtimer.mark("stokes");
+    dtimer.mark("dolp");
+    dtimer.mark("aolp");
   }
 
-  dtimer.mark("dolp");
-
-  // --- AoLP ---
-  if (publish_aolp_ && m_pub_aolp_) {
-    // AoLP = 0.5 * atan2(S2, S1)
-    // Range: [-π/2, +π/2] → mapped to [0, 255] uint8
-    // 0 → -90°, 128 → 0°, 255 → +90°
-    //
-    // Vectorized via cv::phase(S1, S2) which returns atan2(S2, S1) in [0, 2π).
-    // We remap to the original [-π, π] range by subtracting 2π where phase > π,
-    // then normalize: atan2/(2π) + 0.5 → [0, 1] → [0, 255] uint8.
-    // cv::phase uses SIMD (ARM NEON / SSE) for a significant speedup over a scalar loop.
-    cv::Mat phase_mat;
-    cv::phase(S1, S2, phase_mat, false);  // atan2(S2, S1) remapped to [0, 2π)
-
-    // Normalize: divide by 2π, add 0.5, wrap values ≥ 1 back by subtracting 1
-    constexpr float inv_2pi = 0.15915494309189534561f;  // 1.0f / (2π)
-    cv::multiply(phase_mat, inv_2pi, phase_mat);        // [0, 1)
-    cv::add(phase_mat, 0.5f, phase_mat);                // [0.5, 1.5)
-    cv::subtract(phase_mat, 1.0f, phase_mat, phase_mat >= 1.0f);  // wrap to [0, 1)
-    phase_mat *= 255.0f;
-    cv::min(phase_mat, 255.0f, phase_mat);
-    cv::max(phase_mat, 0.0f, phase_mat);
-
-    cv::Mat aolp_u8;
-    phase_mat.convertTo(aolp_u8, CV_8U);
-
-    if (out_aolp) *out_aolp = aolp_u8.clone();
-
-    // Publish raw AoLP (mono8)
-    {
-      auto msg = std::make_unique<sensor_msgs::msg::Image>();
-      fill_header_(msg->header, pImage);
-      msg->height = stokes_h;
-      msg->width = stokes_w;
-      msg->encoding = "mono8";
-      msg->is_bigendian = 0;
-      msg->step = stokes_w;
-      msg->data.assign(aolp_u8.data, aolp_u8.data + aolp_u8.total());
-      m_pub_aolp_->publish(std::move(msg));
+  if (gpu_ok) {
+    // Publish DOLP
+    if (publish_dolp_ && m_pub_dolp_) {
+      if (out_dolp) *out_dolp = dolp_u8.clone();
+      {
+        auto msg = std::make_unique<sensor_msgs::msg::Image>();
+        fill_header_(msg->header, pImage);
+        msg->height = stokes_h; msg->width = stokes_w;
+        msg->encoding = "mono8"; msg->is_bigendian = 0; msg->step = stokes_w;
+        msg->data.assign(dolp_u8.data, dolp_u8.data + dolp_u8.total());
+        m_pub_dolp_->publish(std::move(msg));
+      }
+      if (publish_compressed_ && m_pub_dolp_compressed_) {
+        auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+        fill_header_(msg->header, pImage);
+        msg->format = "jpeg";
+        jpeg_encode_(dolp_u8, msg->data);
+        m_pub_dolp_compressed_->publish(std::move(msg));
+      }
     }
-
-    // Publish compressed AoLP
-    if (publish_compressed_ && m_pub_aolp_compressed_) {
-      auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-      fill_header_(msg->header, pImage);
-      msg->format = "jpeg";
-      jpeg_encode_(aolp_u8, msg->data);
-      m_pub_aolp_compressed_->publish(std::move(msg));
+    // Publish AoLP
+    if (publish_aolp_ && m_pub_aolp_) {
+      if (out_aolp) *out_aolp = aolp_u8.clone();
+      {
+        auto msg = std::make_unique<sensor_msgs::msg::Image>();
+        fill_header_(msg->header, pImage);
+        msg->height = stokes_h; msg->width = stokes_w;
+        msg->encoding = "mono8"; msg->is_bigendian = 0; msg->step = stokes_w;
+        msg->data.assign(aolp_u8.data, aolp_u8.data + aolp_u8.total());
+        m_pub_aolp_->publish(std::move(msg));
+      }
+      if (publish_compressed_ && m_pub_aolp_compressed_) {
+        auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+        fill_header_(msg->header, pImage);
+        msg->format = "jpeg";
+        jpeg_encode_(aolp_u8, msg->data);
+        m_pub_aolp_compressed_->publish(std::move(msg));
+      }
     }
-  }
+  } else {
+#else
+  {
+#endif  // HAS_POLAR_KERNEL
+    // --- CPU fallback path ---
+    // Derive grayscale intensity from the pre-converted BGR mats via cvtColor.
+    // cvtColor(BGR→GRAY) uses BT.601 weighting, consistent across all 4 channels.
+    auto to_gray_float = [&](size_t idx) -> cv::Mat {
+      cv::Mat gray, gray_f;
+      cv::cvtColor(cached_bgr[idx], gray, cv::COLOR_BGR2GRAY);
+      gray.convertTo(gray_f, CV_32F);
+      return gray_f;
+    };
 
-  dtimer.mark("aolp");
+    cv::Mat f0   = to_gray_float(0);   // I_0°
+    cv::Mat f45  = to_gray_float(1);   // I_45°
+    cv::Mat f90  = to_gray_float(2);   // I_90°
+    cv::Mat f135 = to_gray_float(3);   // I_135°
+    dtimer.mark("stokes_conv");
+
+    // Stokes parameters (vectorized OpenCV operations)
+    cv::Mat S0 = f0 + f90;       // Total intensity
+    cv::Mat S1 = f0 - f90;       // Horizontal vs vertical
+    cv::Mat S2 = f45 - f135;     // Diagonal
+    dtimer.mark("stokes");
+
+    // --- DOLP ---
+    if (publish_dolp_ && m_pub_dolp_) {
+      cv::Mat S1_sq, S2_sq, numerator, dolp_float;
+      cv::multiply(S1, S1, S1_sq);
+      cv::multiply(S2, S2, S2_sq);
+      cv::sqrt(S1_sq + S2_sq, numerator);
+
+      dolp_float = cv::Mat::zeros(stokes_h, stokes_w, CV_32F);
+      cv::Mat s0_safe;
+      cv::max(S0, 1e-5f, s0_safe);
+      cv::divide(numerator, s0_safe, dolp_float);
+      dolp_float.setTo(0.0f, S0 <= 1e-5f);
+      cv::min(dolp_float, 1.0f, dolp_float);
+      cv::max(dolp_float, 0.0f, dolp_float);
+      dolp_float.convertTo(dolp_u8, CV_8U, 255.0);
+
+      if (out_dolp) *out_dolp = dolp_u8.clone();
+      {
+        auto msg = std::make_unique<sensor_msgs::msg::Image>();
+        fill_header_(msg->header, pImage);
+        msg->height = stokes_h; msg->width = stokes_w;
+        msg->encoding = "mono8"; msg->is_bigendian = 0; msg->step = stokes_w;
+        msg->data.assign(dolp_u8.data, dolp_u8.data + dolp_u8.total());
+        m_pub_dolp_->publish(std::move(msg));
+      }
+      if (publish_compressed_ && m_pub_dolp_compressed_) {
+        auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+        fill_header_(msg->header, pImage);
+        msg->format = "jpeg";
+        jpeg_encode_(dolp_u8, msg->data);
+        m_pub_dolp_compressed_->publish(std::move(msg));
+      }
+    }
+    dtimer.mark("dolp");
+
+    // --- AoLP ---
+    if (publish_aolp_ && m_pub_aolp_) {
+      cv::Mat phase_mat;
+      cv::phase(S1, S2, phase_mat, false);  // atan2(S2, S1) remapped to [0, 2π)
+      constexpr float inv_2pi = 0.15915494309189534561f;
+      cv::multiply(phase_mat, inv_2pi, phase_mat);
+      cv::add(phase_mat, 0.5f, phase_mat);
+      cv::subtract(phase_mat, 1.0f, phase_mat, phase_mat >= 1.0f);
+      phase_mat *= 255.0f;
+      cv::min(phase_mat, 255.0f, phase_mat);
+      cv::max(phase_mat, 0.0f, phase_mat);
+      phase_mat.convertTo(aolp_u8, CV_8U);
+
+      if (out_aolp) *out_aolp = aolp_u8.clone();
+      {
+        auto msg = std::make_unique<sensor_msgs::msg::Image>();
+        fill_header_(msg->header, pImage);
+        msg->height = stokes_h; msg->width = stokes_w;
+        msg->encoding = "mono8"; msg->is_bigendian = 0; msg->step = stokes_w;
+        msg->data.assign(aolp_u8.data, aolp_u8.data + aolp_u8.total());
+        m_pub_aolp_->publish(std::move(msg));
+      }
+      if (publish_compressed_ && m_pub_aolp_compressed_) {
+        auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+        fill_header_(msg->header, pImage);
+        msg->format = "jpeg";
+        jpeg_encode_(aolp_u8, msg->data);
+        m_pub_aolp_compressed_->publish(std::move(msg));
+      }
+    }
+    dtimer.mark("aolp");
+  }  // end CPU fallback
 
   // Log DOLP/AoLP profiling detail if enabled
   if (profile_processing_) {
@@ -1193,6 +1244,18 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
             // Cached BGR mats — reused for max-combined to avoid duplicate Bayer→BGR conversion
             cv::Mat cached_bgr[4];
 
+            // Raw mono8 pointers from SplitChannels — used by GPU kernel to skip BGR→gray.
+            // The ArenaImageVector 'channels' stays alive for the entire block, so these
+            // pointers remain valid until compute_and_publish_dolp_aolp_ returns.
+            const uint8_t* raw_ch[4] = {
+              static_cast<const uint8_t*>(channels[0]->GetData()),
+              static_cast<const uint8_t*>(channels[1]->GetData()),
+              static_cast<const uint8_t*>(channels[2]->GetData()),
+              static_cast<const uint8_t*>(channels[3]->GetData()),
+            };
+            const int raw_w = static_cast<int>(channels[0]->GetWidth());
+            const int raw_h = static_cast<int>(channels[0]->GetHeight());
+
             struct ChannelInfo {
               size_t index;
               std::string name;
@@ -1205,43 +1268,55 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
               {2, "90deg", &m_pub_pol_90deg_, &m_pub_pol_90deg_compressed_},
               {3, "135deg", &m_pub_pol_135deg_, &m_pub_pol_135deg_compressed_}
             };
-            for (const auto& info : channel_infos) {
-              arena_camera::ArenaImagePtr bgr_image(
-                  Arena::ImageFactory::Convert(channels[info.index], PFNC_BGR8));
-              if (!validate_bgr8_format(bgr_image.get(), "polarization channel " + info.name)) {
-                continue;
+            // Debayer needed when publishing channels or max (both require BGR).
+            const bool need_bgr = publish_pol_channels_ ||
+                                  ((publish_raw_ && m_pub_pol_max_) ||
+                                   (publish_compressed_ && m_pub_pol_max_compressed_));
+            if (need_bgr) {
+              for (const auto& info : channel_infos) {
+                arena_camera::ArenaImagePtr bgr_image(
+                    Arena::ImageFactory::Convert(channels[info.index], PFNC_BGR8));
+                if (!validate_bgr8_format(bgr_image.get(), "polarization channel " + info.name)) {
+                  continue;
+                }
+                cv::Mat bgr_mat(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3,
+                               const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
+                cached_bgr[info.index] = bgr_mat.clone();
+                if (display_images_active_ && info.index < 4) {
+                  display_ch[info.index] = cached_bgr[info.index];
+                }
               }
-              // Cache BGR data for max-combined (avoids duplicate Bayer→BGR conversion)
-              cv::Mat bgr_mat(bgr_image->GetHeight(), bgr_image->GetWidth(), CV_8UC3,
-                             const_cast<void*>(static_cast<const void*>(bgr_image->GetData())));
-              cached_bgr[info.index] = bgr_mat.clone();
-
-              // Capture for debug display window (reuse cached clone)
-              if (display_images_active_ && info.index < 4) {
-                display_ch[info.index] = cached_bgr[info.index];
-              }
-              if (publish_raw_ && *info.raw_pub) {
-                auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
-                fill_header_(pol_msg->header, pImage);
-                pol_msg->height = bgr_image->GetHeight();
-                pol_msg->width = bgr_image->GetWidth();
-                pol_msg->encoding = "bgr8";
-                pol_msg->is_bigendian = 0;
-                pol_msg->step = pol_msg->width * 3;
-                size_t data_size = bgr_image->GetHeight() * bgr_image->GetWidth() * 3;
-                pol_msg->data.resize(data_size);
-                std::memcpy(&pol_msg->data[0], bgr_image->GetData(), data_size);
-                (*info.raw_pub)->publish(std::move(pol_msg));
-              }
-              if (publish_compressed_ && *info.compressed_pub) {
-                auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-                fill_header_(compressed_msg->header, pImage);
-                compressed_msg->format = "jpeg";
-                jpeg_encode_(bgr_mat, compressed_msg->data);
-                (*info.compressed_pub)->publish(std::move(compressed_msg));
-              }
+              ptimer.mark("ch_debayer");
             }
-            ptimer.mark("channels");
+
+            // Per-channel publish (only when publish_pol_channels_ is true)
+            if (publish_pol_channels_) {
+              for (const auto& info : channel_infos) {
+                if (cached_bgr[info.index].empty()) continue;
+                const cv::Mat& bgr_mat = cached_bgr[info.index];
+                if (publish_raw_ && *info.raw_pub) {
+                  auto pol_msg = std::make_unique<sensor_msgs::msg::Image>();
+                  fill_header_(pol_msg->header, pImage);
+                  pol_msg->height = bgr_mat.rows;
+                  pol_msg->width = bgr_mat.cols;
+                  pol_msg->encoding = "bgr8";
+                  pol_msg->is_bigendian = 0;
+                  pol_msg->step = pol_msg->width * 3;
+                  size_t data_size = static_cast<size_t>(bgr_mat.rows) * bgr_mat.cols * 3;
+                  pol_msg->data.resize(data_size);
+                  std::memcpy(&pol_msg->data[0], bgr_mat.data, data_size);
+                  (*info.raw_pub)->publish(std::move(pol_msg));
+                }
+                if (publish_compressed_ && *info.compressed_pub) {
+                  auto compressed_msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+                  fill_header_(compressed_msg->header, pImage);
+                  compressed_msg->format = "jpeg";
+                  jpeg_encode_(bgr_mat, compressed_msg->data);
+                  (*info.compressed_pub)->publish(std::move(compressed_msg));
+                }
+              }
+              ptimer.mark("ch_jpeg");
+            }
 
             // Max-combined image (reuses cached BGR mats from per-channel loop)
             if ((publish_raw_ && m_pub_pol_max_) || (publish_compressed_ && m_pub_pol_max_compressed_)) {
@@ -1282,17 +1357,14 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
             }
             ptimer.mark("max");
 
-            // Compute and publish DOLP / AoLP; capture display images if needed
+            // Compute and publish DOLP / AoLP
+            // GPU path uses raw_ch directly; CPU fallback uses cached_bgr (requires
+            // publish_pol_channels_ to have been run first to populate it).
             if ((publish_dolp_ && m_pub_dolp_) || (publish_aolp_ && m_pub_aolp_)) {
-              bool all_valid = !cached_bgr[0].empty() && !cached_bgr[1].empty() &&
-                               !cached_bgr[2].empty() && !cached_bgr[3].empty();
-              if (!all_valid) {
-                log_warn("Skipping DOLP/AoLP — not all channels converted successfully");
-              } else {
-                compute_and_publish_dolp_aolp_(pImage, cached_bgr,
-                    display_images_active_ ? &display_dolp : nullptr,
-                    display_images_active_ ? &display_aolp : nullptr);
-              }
+              compute_and_publish_dolp_aolp_(pImage, cached_bgr,
+                  raw_ch, raw_w, raw_h,
+                  display_images_active_ ? &display_dolp : nullptr,
+                  display_images_active_ ? &display_aolp : nullptr);
             }
             ptimer.mark("dolp_aolp");
 
