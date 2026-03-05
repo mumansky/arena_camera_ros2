@@ -72,7 +72,7 @@
 #include "arena_image_raii.h"
 #include "light_arena/deviceinfo_helper.h"
 #include "rclcpp_adapter/pixelformat_translation.h"
-#include "rclcpp_adapter/quilty_of_service_translation.cpp"
+#include "rclcpp_adapter/quality_of_service_translation.cpp"
 
 // ============================================================================
 // Pixel Format Constants
@@ -526,7 +526,7 @@ void ArenaCameraNode::initialize_()
   rclcpp::SensorDataQoS pub_qos_;
   // QoS history
   if (is_passed_pub_qos_history_) {
-    if (is_supported_qos_histroy_policy(pub_qos_history_)) {
+    if (is_supported_qos_history_policy(pub_qos_history_)) {
       pub_qos_.history(
           K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY[pub_qos_history_]);
     } else {

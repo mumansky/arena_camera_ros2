@@ -7,7 +7,7 @@
 #include <string>
 
 // Include the QoS translation header
-#include "rclcpp_adapter/quilty_of_service_translation.cpp"
+#include "rclcpp_adapter/quality_of_service_translation.cpp"
 
 /**
  * @brief Test reliability policy string to enum mapping
@@ -88,21 +88,21 @@ TEST(QoSTranslationTest, IsSupportedReliabilityPolicy)
 }
 
 /**
- * @brief Test is_supported_qos_histroy_policy function
+ * @brief Test is_supported_qos_history_policy function
  */
 TEST(QoSTranslationTest, IsSupportedHistoryPolicy)
 {
   // Supported policies
-  EXPECT_TRUE(is_supported_qos_histroy_policy("system_default"));
-  EXPECT_TRUE(is_supported_qos_histroy_policy("keep_last"));
-  EXPECT_TRUE(is_supported_qos_histroy_policy("keep_all"));
-  EXPECT_TRUE(is_supported_qos_histroy_policy("unknown"));
+  EXPECT_TRUE(is_supported_qos_history_policy("system_default"));
+  EXPECT_TRUE(is_supported_qos_history_policy("keep_last"));
+  EXPECT_TRUE(is_supported_qos_history_policy("keep_all"));
+  EXPECT_TRUE(is_supported_qos_history_policy("unknown"));
 
   // Unsupported policies
-  EXPECT_FALSE(is_supported_qos_histroy_policy("invalid"));
-  EXPECT_FALSE(is_supported_qos_histroy_policy(""));
-  EXPECT_FALSE(is_supported_qos_histroy_policy("KEEP_LAST"));  // Case sensitive
-  EXPECT_FALSE(is_supported_qos_histroy_policy("Keep_All"));
+  EXPECT_FALSE(is_supported_qos_history_policy("invalid"));
+  EXPECT_FALSE(is_supported_qos_history_policy(""));
+  EXPECT_FALSE(is_supported_qos_history_policy("KEEP_LAST"));  // Case sensitive
+  EXPECT_FALSE(is_supported_qos_history_policy("Keep_All"));
 }
 
 /**

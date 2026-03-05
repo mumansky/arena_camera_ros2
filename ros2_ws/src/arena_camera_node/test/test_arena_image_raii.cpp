@@ -216,19 +216,18 @@ TEST(ArenaImageRaiiTest, ArenaImageVectorIterator)
 }
 
 /**
- * @brief Test self-move-assignment is safe
+ * @brief Test that a freshly default-constructed vector is in a valid state
+ *
+ * Note: self-move-assignment (vec = std::move(vec)) is undefined behavior for
+ * std::vector per the C++ standard [lib.types.movedfrom] and was removed.
+ * The move-assignment path is already covered by ArenaImageVectorMoveAssignment.
  */
-TEST(ArenaImageRaiiTest, ArenaImageVectorSelfMoveAssignment)
+TEST(ArenaImageRaiiTest, ArenaImageVectorDefaultStateIsValid)
 {
   arena_camera::ArenaImageVector vec;
-  vec.push_back(nullptr);
-  
-  // Self-move-assignment should be safe
-  vec = std::move(vec);
-  
-  // After self-move, behavior is implementation-defined, but it should not crash
-  // Just verify we can still access it without crashing
-  EXPECT_NO_THROW(vec.size());
+  EXPECT_TRUE(vec.empty());
+  EXPECT_EQ(vec.size(), 0u);
+  EXPECT_NO_THROW(vec.clear());
 }
 
 int main(int argc, char** argv)

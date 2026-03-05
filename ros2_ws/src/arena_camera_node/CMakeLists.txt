@@ -118,7 +118,7 @@ add_executable(${target_name}
     src/ArenaCameraNode.cpp
     src/light_arena/deviceinfo_helper.cpp
     src/rclcpp_adapter/pixelformat_translation.cpp
-    src/rclcpp_adapter/quilty_of_service_translation.cpp
+    src/rclcpp_adapter/quality_of_service_translation.cpp
 )
 
 target_include_directories(${target_name}
