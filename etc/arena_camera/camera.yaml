@@ -160,6 +160,16 @@
     # Angle of Linear Polarization (AoLP): mono8 image mapping [-90°,+90°] to [0,255]
     # Computed from Stokes parameters: AoLP = 0.5 * atan2(S2, S1)
     publish_aolp: true
+    # Stokes Parameters (S0, S1, S2): mono8 encoded images
+    # S0 = I_0 + I_90  (total intensity)  → scaled by 0.5 to fit [0,255]
+    # S1 = I_0 - I_90  (horizontal vs vertical) → (S1+255)/2, so 128=zero
+    # S2 = I_45 - I_135 (diagonal) → same encoding as S1
+    # Topics: /stokes_s0, /stokes_s1, /stokes_s2 (+ /compressed when publish_compressed: true)
+    publish_stokes: false
+    # False-color AoLP: BGR image using HSV colormap (H=angle, S=DOLP, V=200)
+    # Makes polarization angle visually intuitive. Requires publish_dolp and publish_aolp.
+    # Published to: <topic>/aolp_color/compressed (JPEG only)
+    publish_aolp_color: false
     
     # Processing Profiler
     # -------------------
@@ -191,6 +201,32 @@
     # "gpu":  force GPU — logs a warning and falls back if nvJPEG init fails
     # "cpu":  always use cv::imencode (useful for profiling comparisons)
     gpu_acceleration: "auto"
+
+    # Camera Auto-Reconnection
+    # -------------------------
+    # When the watchdog detects a frozen camera, automatically attempt to reconnect.
+    # reconnect_max_attempts: Maximum number of reconnection attempts before giving up.
+    #   0 (default): infinite retries — keep trying until the camera comes back
+    #   >0: give up after N attempts and log FATAL (requires manual node restart)
+    reconnect_max_attempts: 0
+
+    # End-to-End Latency Profiling
+    # -----------------------------
+    # Measure and log per-frame latency from image arrival to publish.
+    # "off"      (default): no latency measurement
+    # "callback": measure Arena callback entry → publish (always valid)
+    # "hardware": measure camera hardware timestamp → publish (requires PTP sync)
+    # "both":     measure both
+    # Results logged at DEBUG level and available in /diagnostics.
+    latency_mode: "off"
+
+    # Camera Calibration (CameraInfo)
+    # --------------------------------
+    # Path to a ROS camera calibration YAML file. When set, the node publishes
+    # calibrated K/D/R/P matrices on <topic>/camera_info. If unset or empty,
+    # an uncalibrated stub (all-zero matrices, correct w/h/frame_id) is published.
+    # Use "file:///absolute/path/to/calibration.yaml" format.
+    # camera_info_url: "file:///home/user/calibration/camera.yaml"
 
     # Watchdog / Heartbeat
     # --------------------

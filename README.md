@@ -1,282 +1,321 @@
 # arena_camera_ros2
-Arena Camera deriver for ROS2 - forked and updated by Mark Umansky
+Arena Camera driver for ROS2 - forked and updated by Mark Umansky
 
 # Requirements
 
-  - OS       : Linux (x64/amd64/arm64) (==22.04) 
-  - ROS2     : Humble Hawksbill 
-  - ArenaSDK and arena_api : https://thinklucid.com/downloads-hub/
+  - OS       : Linux (x64/amd64/arm64) (Ubuntu 22.04)
+  - ROS2     : Humble Hawksbill
+  - ArenaSDK : https://thinklucid.com/downloads-hub/
 
-  
+# Dependencies
+
+Core ROS2 packages (install once):
+
+    sudo apt install ros-humble-camera-info-manager
+
 # Getting Started
-- clone repo or download release
-    
-    `git clone https://github.com/lucidvisionlabs/arena_camera_ros2.git`
 
-- install ArenaSDK and arena_api
-  - https://thinklucid.com/downloads-hub/
+- Clone repo or download release
 
+      git clone https://github.com/lucidvisionlabs/arena_camera_ros2.git
 
-- build workspace and its dependencies
+- Install ArenaSDK: https://thinklucid.com/downloads-hub/
 
-    `source /opt/ros/humble/setup.bash` 
+- Build and run tests
 
-    `cd arena_camera_ros2/ros2_ws`
+      bash build_and_test.sh
 
-    `colcon build --symlink-install # build workspace for dev`
+  Or build without tests:
 
-- install the build
+      bash build_and_test.sh --no-test
 
-    `. install/setup.bash`
+  For a clean rebuild:
 
-# Explore
-- explore nodes
-    - arena_camera_node
-      - this is the main node. It represent one LUCID Camera.
-      - it has two executable `start` and `trigger_image`
-      
-      ## Configuration
-      
-      The node automatically loads settings from `etc/arena_camera/camera.yaml` in the project root on startup. This allows you to set default camera parameters without using command-line arguments every time.
-      
-      **Priority:** Command-line ROS arguments always override settings from the config file.
-      
-      **Config file location:** `arena_camera_ros2/etc/arena_camera/camera.yaml`
-      
-      Edit this file to set your preferred defaults for parameters like resolution, exposure, gain, frame rate, etc.
-      
-      ## ROS Arguments
-      
-      All parameters can be set via ROS arguments, which will override any values in the config file:
-      
-        - serial 
-          - a string representing the serial of the device to create.
-          - if not provided the node, it will represent the first dicovered camera.
-        - topic
-          - the topic the camera publish images on.
-          - default value is /arena_camera_node/images.
-          - if passed as a ros argument, it should be preceded with "/"
-        - width
-          - the width of desired image
-          - default value is the one in `default` user profile.
-        - height
-          - the height of desired image
-          - default value is the one in `default` user profile.
-        - pixelformat
-          - the pixel format of the deisred image
-          - supported pixelformats are "rgb8", "rgba8", "rgb16", "rgba16", "bgr8", "bgra8", "bgr16", "bgra16",
-                                       "mono8", "mono16", "bayer_rggb8", "bayer_bggr8", "bayer_gbrg8",
-                                       "bayer_grbg8", "bayer_rggb16", "bayer_bggr16", "bayer_gbrg16", "bayer_grbg16", 
-                                       "yuv422", "polarized_angles_0d_45d_90d_135d_bayer_rg8"
-          - the "polarized_angles_0d_45d_90d_135d_bayer_rg8" format is for polarization cameras like PHX050S1-QC
-        - gain
-          - a double value represents the gain of the image.
+      bash build_and_test.sh --clean
 
-        - auto_gain
-          - sets camera gain auto mode via GenICam `GainAuto`.
-          - common values: "Off", "Once", "Continuous" (device-dependent).
-          - when set to "Once" or "Continuous", manual `gain` is ignored.
+- Source the install and run
 
-        - exposure_time
-          - the time elapsed before the camera sensor creates the image.
-          - units is micro seconds.
-          - big values might makes the image take too long before it is view/published.
-          - if trigger_mode is passed to node then it is recommended to set exposure_time as well so the
-            triggered images do not take longer than expected.
+      source ros2_ws/install/setup.bash
+      ros2 run arena_camera_node start
 
-        - auto_exposure
-          - sets camera exposure auto mode via GenICam `ExposureAuto`.
-          - common values: "Off", "Once", "Continuous" (device-dependent).
-          - when set to "Once" or "Continuous", manual `exposure_time` is ignored.
+# Configuration
 
-        - acquisition_frame_rate_enable
-          - enables manual control of the acquisition frame rate.
-          - when false (default), the camera runs at maximum frame rate.
-          - when true, allows setting a specific frame rate using acquisition_frame_rate parameter.
-          - values are true and false.
+All parameters are read from `etc/arena_camera/camera.yaml` on startup — the single source of truth. Edit this file to set defaults without passing command-line arguments every time.
 
-        - acquisition_frame_rate
-          - target acquisition frame rate in frames per second (FPS).
-          - only takes effect when acquisition_frame_rate_enable is true.
-          - valid range depends on camera model, resolution, and exposure time.
-          - note: frame rate and exposure time are interdependent - lower frame rate allows longer exposure.
+**Priority:** ROS arguments always override the config file.
 
-        - trigger_mode
-          - puts the device in ready state where it will wait for a `trigger_image` client to request an image.
-          - default value is false. It means the device will be publishing images to the
-            default topic `/arena_camera_node/images`.
-          - values are true and false.
-          - when `false`, images can be viewed
+**Config file location:** `arena_camera_ros2/etc/arena_camera/camera.yaml`
 
-            `ros2 run arena_camera_node start --ros-args -p qos_reliability:=reliable -p topic:=image`
+## Parameters
 
-            `ros2 run image_tools showimage`
+### Device Selection
 
-          - when `true`, image would not be published unless requested/triggered
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `serial` | string | _(first found)_ | Serial number of the camera to connect |
 
-            `ros2 run arena_camera_node start --ros-args -p qos_reliability:=reliable -p topic:=image -p exposure_time:=<proper value> -p trigger_mode:=true`
+### Image Topic
 
-            `ros2 run image_tools showimage # no image will be displayed yet`
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `topic` | string | `/arena_camera_node/images` | Base topic for all image publications |
+| `frame_id` | string | `camera_optical_frame` | TF frame ID in all image headers |
+| `use_camera_timestamp` | bool | `false` | Use camera hardware clock (requires PTP sync); default uses ROS clock |
 
-            `ros2 run arena_camera_node trigger_image`
+### Resolution & Format
 
-        - publish_raw
-          - controls whether to publish raw uncompressed images (sensor_msgs/Image).
-          - default value is true.
-          - values are true and false.
-          - raw images published to main topic (e.g., `/arena_camera_node/images`)
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `width` | int | _(camera default)_ | Image width in pixels |
+| `height` | int | _(camera default)_ | Image height in pixels |
+| `pixelformat` | string | _(camera default)_ | ROS pixel format string; see supported values below |
 
-        - publish_compressed
-          - controls whether to publish JPEG compressed images (sensor_msgs/CompressedImage).
-          - default value is false.
-          - values are true and false.
-          - compressed images published to `<topic>/compressed`
-          - both publish_raw and publish_compressed can be enabled simultaneously
-       
-      - QoS related parameters
-        - if using these images with some subscriber make sure: 
-          - both `arena_camera_node` and the subscriber on the same topic.
-          - both have the same `QoS` settings else the images will be published but the subscriber would not see them because the image mags have a different `QoS` than the subscriber.
-          - `QoS` parameter
-          - qos_history
-            - represents the history value of `QoS` for the image publisher.
-            - default value is `keep_last`. 
-            - supported values are "system_default","keep_last", "keep_all", "unknown".
-            - more about `QoS`: https://index.ros.org/doc/ros2/Concepts/About-Quality-of-Service-Settings/
-          
-          - qos_history_depth
-            - represents the depth value of `QoS` for the image publisher.
-            - default value is `5`.
-            - more about `QoS`: https://index.ros.org/doc/ros2/Concepts/About-Quality-of-Service-Settings/
-          
-          - qos_reliability
-            - represents the reliability value of `QoS` for the image publisher.
-            - default value is `best_effort`
-            - supported values are "system_default", "reliable", "best_effort", "unknown".
-            - more about `QoS`: https://index.ros.org/doc/ros2/Concepts/About-Quality-of-Service-Settings/
+Supported pixel formats: `mono8`, `mono16`, `rgb8`, `rgba8`, `rgb16`, `rgba16`, `bgr8`, `bgra8`, `bgr16`, `bgra16`, `bayer_rggb8`, `bayer_bggr8`, `bayer_gbrg8`, `bayer_grbg8`, `bayer_rggb16`, `bayer_bggr16`, `bayer_gbrg16`, `bayer_grbg16`, `yuv422`, `polarized_angles_0d_45d_90d_135d_bayer_rg8`
 
-      ## Polarized Camera Support
-      
-      The node supports polarized cameras (e.g., PHX050S1-QC) with the `polarized_angles_0d_45d_90d_135d_bayer_rg8` pixel format.
-      
-      When using a polarized camera:
-      - The node automatically extracts and publishes all 4 polarization angle channels (0°, 45°, 90°, 135°)
-      - The main topic publishes raw 4-channel polarized data: `/arena_camera_node/images`
-      - **Note:** The main topic compressed (`/images/compressed`) is not used for polarized cameras (the 4-channel format cannot be compressed to JPEG)
-      - Eight polarization channel topics are published (depending on publish_raw/publish_compressed settings):
-        - `/arena_camera_node/pol_0deg` - raw BGR8 image of 0° channel (if publish_raw=true)
-        - `/arena_camera_node/pol_0deg/compressed` - JPEG compressed 0° (if publish_compressed=true)
-        - `/arena_camera_node/pol_45deg` - raw BGR8 image of 45° channel (if publish_raw=true)
-        - `/arena_camera_node/pol_45deg/compressed` - JPEG compressed 45° (if publish_compressed=true)
-        - `/arena_camera_node/pol_90deg` - raw BGR8 image of 90° channel (if publish_raw=true)
-        - `/arena_camera_node/pol_90deg/compressed` - JPEG compressed 90° (if publish_compressed=true)
-        - `/arena_camera_node/pol_135deg` - raw BGR8 image of 135° channel (if publish_raw=true)
-        - `/arena_camera_node/pol_135deg/compressed` - JPEG compressed 135° (if publish_compressed=true)
-      - The BGR8 conversion and compression happens automatically for each channel
-      
-      ## Example Usage
+### Exposure & Gain
 
-        # Simple example with config file (settings loaded from etc/arena_camera/camera.yaml)
-        `ros2 run arena_camera_node start`
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `gain` | double | _(camera default)_ | Manual gain in dB |
+| `auto_gain` | string | — | `"Off"`, `"Once"`, `"Continuous"` |
+| `exposure_time` | double | _(camera default)_ | Exposure time in microseconds |
+| `auto_exposure` | string | — | `"Off"`, `"Once"`, `"Continuous"` |
+| `short_exposure_enable` | bool | `false` | Allow exposure below the standard minimum |
+| `exposure_auto_algorithm` | string | `"Mean"` | Auto exposure algorithm: `"Mean"` or `"Median"` |
+| `target_brightness` | int | — | Auto exposure target brightness (0–255) |
+| `exposure_auto_damping` | double | — | Auto exposure response speed (0–100; higher = slower) |
+| `exposure_auto_limit_auto` | string | — | `"Off"` or `"Continuous"` for auto limit calculation |
+| `exposure_auto_upper_limit` | double | — | Upper limit for auto exposure in microseconds |
+| `exposure_auto_lower_limit` | double | — | Lower limit for auto exposure in microseconds |
 
-        # Simple example overriding config with arguments
+### Frame Rate
 
-        # Simple example overriding config with arguments
-        `ros2 run arena_camera_node start --ros-args -p serial:="904240001" -p topic:=/special_images -p width:=100 -p height:=200 -p pixelformat:=rgb8 -p gain:=10 -p exposure_time:=150 -p trigger_mode:=true` 
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `acquisition_frame_rate_enable` | bool | `false` | Enable manual frame rate control |
+| `acquisition_frame_rate` | double | — | Target FPS (requires `acquisition_frame_rate_enable: true`) |
 
-        # Example with frame rate control
-        `ros2 run arena_camera_node start --ros-args -p acquisition_frame_rate_enable:=true -p acquisition_frame_rate:=30.0 -p exposure_time:=10000.0`
+### Publishing
 
-        # Example with polarized camera
-        `ros2 run arena_camera_node start --ros-args -p pixelformat:=polarized_angles_0d_45d_90d_135d_bayer_rg8`
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `publish_raw` | bool | `true` | Publish `sensor_msgs/Image` on `<topic>` |
+| `publish_compressed` | bool | `false` | Publish JPEG `sensor_msgs/CompressedImage` on `<topic>/compressed` |
+| `jpeg_quality` | int | `80` | JPEG compression quality (1–100) |
+| `stream_buffer_count` | int | `10` | Number of internal SDK stream buffers |
 
-        # Example publishing compressed images only (save bandwidth)
-        `ros2 run arena_camera_node start --ros-args -p publish_raw:=false -p publish_compressed:=true`
+### Polarized Camera Topics
 
-        # Example publishing both raw and compressed
-        `ros2 run arena_camera_node start --ros-args -p publish_raw:=true -p publish_compressed:=true`
+Available only when `pixelformat: polarized_angles_0d_45d_90d_135d_bayer_rg8`.
 
-- explore excutables
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `publish_pol_channels` | bool | `true` | Publish 4 per-angle BGR images (`/pol_0deg`, `/pol_45deg`, `/pol_90deg`, `/pol_135deg`) |
+| `publish_pol_max` | bool | `true` | Publish pixel-wise max of all 4 channels (`/pol_max`) |
+| `publish_dolp` | bool | `false` | Publish Degree of Linear Polarization as mono8 (`/dolp`) |
+| `publish_aolp` | bool | `false` | Publish Angle of Linear Polarization as mono8 (`/aolp`) |
+| `publish_stokes` | bool | `false` | Publish Stokes parameters S0/S1/S2 as mono8 (`/stokes_s0`, `/stokes_s1`, `/stokes_s2`) |
+| `publish_aolp_color` | bool | `false` | Publish false-color AoLP HSV visualization as JPEG (`/aolp_color/compressed`). Requires `publish_dolp: true` and `publish_aolp: true`. |
 
-  - `ros2 pkg executables | grep arena`
-    
-  - all excutables can be run by using 
+**Stokes encoding:** S0 = (I₀ + I₉₀) × 0.5 → [0,255]. S1/S2 = (x + 255) / 2 → [0,255] where 128 = zero.
 
-    `ros2 run <pakg name> <executable name>`
+**AoLP color:** HSV colormap — H = polarization angle, S = DOLP (confidence), V = 200 (fixed).
 
-- explore actions
-  
-  - None
+All polarization topics respect `publish_raw` and `publish_compressed`.
 
-- explore services 
-  - trigger_image 
-    - trigger image form a device that is running in trigger_mode.
-    - To run a device in trigger mode
-      `ros2 run arena_camera_node start --ros-args -p exposure_time:=<proper value> -p trigger_mode=true`
-    - To trigger an image run 
-      `ros2 run arena_camera_node trigger_image`
+### Camera Info / Calibration
 
-# Logging Verbosity
-The node uses standard ROS2 logging levels. By default, per-image publish messages are logged at DEBUG level to reduce console noise.
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `camera_info_url` | string | `""` | Path to ROS calibration YAML, e.g. `file:///home/user/cal.yaml`. Empty = uncalibrated stub. |
 
-To enable verbose debug logging, set the log level when starting the node:
+`sensor_msgs/CameraInfo` is always published on `<topic>/camera_info` with the same header stamp as the image. See [docs/camera-calibration.md](docs/camera-calibration.md) for the full calibration workflow.
 
-    `ros2 run arena_camera_node start --ros-args --log-level debug`
+### Trigger Mode
 
-Or for even more detail:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `trigger_mode` | bool | `false` | When `true`, images are only published when the `trigger_image` service is called |
 
-    `ros2 run arena_camera_node start --ros-args --log-level arena_camera_node:=debug`
+### Watchdog & Auto-Reconnect
 
-Available log levels (from most to least verbose): DEBUG, INFO, WARN, ERROR, FATAL
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `watchdog_timeout_sec` | double | `5.0` | Seconds without a new frame before declaring the camera frozen. Set to `0` to disable. |
+| `reconnect_max_attempts` | int | `0` | Max reconnection attempts after a freeze (`0` = infinite). When the camera is declared frozen the node automatically tears down and re-initializes the stream. |
+
+### Latency Profiling
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `latency_mode` | string | `"off"` | `"off"`, `"callback"` (Arena OnImage → publish), `"hardware"` (camera HW clock → publish; requires PTP), or `"both"` |
+
+Latency values are logged at DEBUG level and exposed in `/diagnostics`.
+
+### GPU Acceleration (Orin/Jetson)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `gpu_acceleration` | string | `"auto"` | `"auto"` — use nvJPEG + CUDA kernel if available; `"gpu"` — force GPU; `"cpu"` — always use software path |
+
+### Profiling & Debug
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `profile_processing` | bool | `false` | Log per-frame timing breakdown at DEBUG level |
+| `display_images` | bool | `false` | Show OpenCV debug window (requires `DISPLAY`). Press `s` to save tiles, `q` to close. |
+
+### QoS
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `qos_history` | string | SensorDataQoS | `"keep_last"`, `"keep_all"`, `"system_default"` |
+| `qos_history_depth` | int | `5` | Queue depth (only with `keep_last`) |
+| `qos_reliability` | string | `"best_effort"` | `"best_effort"` or `"reliable"` |
+
+All publishers (images, camera_info, DOLP, AoLP, Stokes, etc.) share the same QoS profile.
+
+---
+
+# Published Topics
+
+For a default polarized camera setup with all features enabled:
+
+| Topic | Type | Condition |
+|-------|------|-----------|
+| `<topic>` | `sensor_msgs/Image` | `publish_raw: true` |
+| `<topic>/compressed` | `sensor_msgs/CompressedImage` | `publish_compressed: true`, non-polarized only |
+| `<topic>/camera_info` | `sensor_msgs/CameraInfo` | Always |
+| `<topic>/pol_0deg` | `sensor_msgs/Image` | `publish_pol_channels: true`, `publish_raw: true` |
+| `<topic>/pol_0deg/compressed` | `sensor_msgs/CompressedImage` | `publish_pol_channels: true`, `publish_compressed: true` |
+| `<topic>/pol_45deg[/compressed]` | … | Same as above |
+| `<topic>/pol_90deg[/compressed]` | … | Same as above |
+| `<topic>/pol_135deg[/compressed]` | … | Same as above |
+| `<topic>/pol_max[/compressed]` | … | `publish_pol_max: true` |
+| `<topic>/dolp[/compressed]` | … | `publish_dolp: true` |
+| `<topic>/aolp[/compressed]` | … | `publish_aolp: true` |
+| `<topic>/stokes_s0[/compressed]` | … | `publish_stokes: true` |
+| `<topic>/stokes_s1[/compressed]` | … | `publish_stokes: true` |
+| `<topic>/stokes_s2[/compressed]` | … | `publish_stokes: true` |
+| `<topic>/aolp_color/compressed` | `sensor_msgs/CompressedImage` | `publish_aolp_color: true` |
+
+---
+
+# Services
+
+| Service | Type | Description |
+|---------|------|-------------|
+| `<node_name>/trigger_image` | `std_srvs/Trigger` | Capture and publish one image (requires `trigger_mode: true`) |
+
+---
+
+# Example Usage
+
+```bash
+# Default — settings from camera.yaml
+ros2 run arena_camera_node start
+
+# Override topic and serial
+ros2 run arena_camera_node start --ros-args -p serial:="904240001" -p topic:=/camera
+
+# Polarized camera with DOLP/AoLP/Stokes/color AoLP
+ros2 run arena_camera_node start --ros-args \
+  -p pixelformat:=polarized_angles_0d_45d_90d_135d_bayer_rg8 \
+  -p publish_dolp:=true \
+  -p publish_aolp:=true \
+  -p publish_stokes:=true \
+  -p publish_aolp_color:=true
+
+# Trigger mode
+ros2 run arena_camera_node start --ros-args -p trigger_mode:=true -p exposure_time:=5000.0
+ros2 run arena_camera_node trigger_image
+
+# View images
+ros2 run image_tools showimage --ros-args -r image:=/arena_camera_node/images
+
+# Compressed-only (save bandwidth)
+ros2 run arena_camera_node start --ros-args -p publish_raw:=false -p publish_compressed:=true
+```
+
+---
 
 # Architecture
 
 ## Node Lifecycle
-1. **Config Loading**: `camera.yaml` is read on startup as the single source of truth for all parameters.
-2. **System Init**: Arena SDK system is opened and device discovery begins.
-3. **Device Connection**: A 1-second timer polls for camera availability.
-4. **Streaming**: Once a camera is found, the node starts streaming:
-   - **Continuous mode** (default): Uses ArenaSDK's callback-based image acquisition (`RegisterImageCallback`). Each frame is processed in `handle_camera_image_()`.
-   - **Trigger mode**: Waits for `trigger_image` service calls. Uses blocking `GetImage()`.
-5. **Shutdown**: Destructor deregisters callbacks, stops streaming, destroys device and system in correct order.
 
-## Image Processing Pipeline
-- Raw images from the camera are published as `sensor_msgs/Image`
-- For non-polarized cameras, images are optionally converted to BGR8 and compressed to JPEG
-- For polarized cameras (pixel format `0x8220020F` / `PolarizedAngles_0d_45d_90d_135d_BayerRG8`):
-  1. The raw 4-channel image is split into 4 separate channels using `ImageFactory::SplitChannels()`
-  2. Channels are ordered: 0°, 45°, 90°, 135° polarization angles
-  3. Each channel is converted from BayerRG8 to BGR8 using `ImageFactory::Convert()`
-  4. A "max-combined" image is computed using per-pixel maximum across all 4 channels
-  5. Each channel and the max-combined image are published as both raw and compressed
+1. **Config loading** — `camera.yaml` is parsed as the parameter source of truth.
+2. **System init** — Arena SDK system opened; device discovery polling starts (1 s timer).
+3. **Streaming** — Once a camera is found:
+   - **Continuous mode** (default): Arena SDK callback (`RegisterImageCallback`) → fast copy in `handle_camera_image_()` → worker thread processes and publishes.
+   - **Trigger mode**: Blocking `GetImage()` on service call.
+4. **Watchdog** — Timer in `produce_diagnostics_()` detects frozen camera. On freeze, `reconnect_()` is started on a detached thread.
+5. **Auto-reconnect** — Structured teardown (stop worker → deregister callback → StopStream → DestroyDevice) followed by re-discovery, re-configuration, and stream restart. Reconnect count and errors are shown in `/diagnostics`.
+6. **Shutdown** — Destructor mirrors the teardown sequence.
 
-## Watchdog
-The node includes a watchdog that detects when the camera stops sending frames. If no new frame arrives within `watchdog_timeout_sec` seconds (default: 5.0), the diagnostics report an ERROR status. The watchdog is only active in continuous (non-trigger) mode. Recovery is automatically detected when frames resume.
+## Image Processing Pipeline (polarized camera)
 
-## QoS Configuration
-The node uses `SensorDataQoS` as the base profile, which defaults to:
-- History: keep_last (depth 5)
-- Reliability: best_effort
-- Durability: volatile
+```
+Arena SDK callback
+  └─ ImageFactory::Copy  →  worker thread queue
+       └─ process_copied_image_()
+            ├─ publish raw Image (publish_raw)
+            ├─ publish CompressedImage (publish_compressed, non-polarized)
+            ├─ publish CameraInfo  (always)
+            ├─ measure latency     (latency_mode != "off")
+            └─ ImageFactory::SplitChannels → 4 mono8 planes
+                 ├─ Bayer→BGR for each channel  (publish_pol_channels / publish_pol_max)
+                 ├─ GPU path: fused CUDA kernel → DOLP, AoLP, S0/S1/S2
+                 │   (polar_compute_gpu — PolarKernelBuffers on device)
+                 ├─ CPU fallback: OpenCV Stokes → DOLP, AoLP, S0/S1/S2
+                 └─ publish DOLP, AoLP, Stokes, AoLP-color
+```
 
-These can be overridden in `camera.yaml` with `qos_history`, `qos_history_depth`, and `qos_reliability`. See the config file for trade-off documentation.
+## GPU Acceleration (Orin/Jetson)
 
-## Compression
-JPEG compression quality is configurable via `jpeg_quality` (1-100, default 80). All compressed image topics use this setting.
+When `HAS_CUDA` is defined at build time and a CUDA device is available at runtime:
+
+- **nvJPEG** hardware JPEG encoding replaces `cv::imencode` for all compressed topics.
+- **Fused CUDA kernel** (`polar_kernel`) computes Stokes parameters, DOLP, AoLP, and (optionally) S0/S1/S2 outputs in a single GPU pass, replacing ~60 ms of CPU work per frame.
+
+Set `gpu_acceleration: "cpu"` to force the software path for benchmarking comparisons.
+
+## Diagnostics
+
+The node publishes to `/diagnostics` via `diagnostic_updater`. Fields include: device connection state, images published, publish errors, incomplete frames, FPS, backpressure events, processing time statistics, watchdog state, reconnect count, and (when enabled) latency measurements.
+
+---
 
 # Running Tests
 
-Unit tests can be run after building the workspace:
+```bash
+bash build_and_test.sh          # build + test
+bash build_and_test.sh --clean  # clean rebuild + test
+bash build_and_test.sh --no-test
+```
 
-    cd ros2_ws
-    colcon test --packages-select arena_camera_node
-    colcon test-result --verbose
+Or manually:
 
-# Road map
-- support windows
-- add -h flag to nodes
-- showimage node to view 2D and 3D images
-- camera_info
-- access to nodemaps
-- support multiple devices simultaneously
-- dynamic reconfigure for runtime parameter changes
+```bash
+cd ros2_ws
+colcon test --packages-select arena_camera_node
+colcon test-result --verbose
+```
+
+---
+
+# Documentation
+
+| Document | Description |
+|----------|-------------|
+| [docs/camera-calibration.md](docs/camera-calibration.md) | End-to-end checkerboard calibration guide |
+| [docs/performance-roadmap.md](docs/performance-roadmap.md) | GPU optimization history and profiling notes |
+| [docs/orin-deployment.md](docs/orin-deployment.md) | NVIDIA Orin / JetPack deployment notes |
+
+---
+
+# Road Map
+
+- Support Windows
+- Support multiple cameras simultaneously
+- Dynamic reconfigure for runtime parameter changes
+- Add `-h` flag to node executables

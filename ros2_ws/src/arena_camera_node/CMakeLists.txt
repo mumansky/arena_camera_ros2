@@ -49,6 +49,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(diagnostic_updater REQUIRED)
+find_package(camera_info_manager REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(arena_sdk REQUIRED)
 find_package(OpenCV REQUIRED)
@@ -142,11 +143,12 @@ target_compile_features(${target_name} PUBLIC cxx_std_17)
 # ROS DEP
 # - this way, it will find our header libs automatically
 # - for Arenasdk the cmake way is used no ament
-ament_target_dependencies(${target_name}  rclcpp 
-                                          std_msgs 
+ament_target_dependencies(${target_name}  rclcpp
+                                          std_msgs
                                           std_srvs
                                           sensor_msgs
                                           diagnostic_updater
+                                          camera_info_manager
                                           arena_sdk
                                           )
 

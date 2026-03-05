@@ -31,9 +31,11 @@
 #include <rclcpp/timer.hpp>           // WallTimer
 #include <sensor_msgs/msg/image.hpp>  //image msg published
 #include <sensor_msgs/msg/compressed_image.hpp>  // compressed image
+#include <sensor_msgs/msg/camera_info.hpp>        // camera_info
 #include <std_msgs/msg/header.hpp>    // for fill_header_ helper
 #include <std_srvs/srv/trigger.hpp>   // Trigger
 #include <diagnostic_updater/diagnostic_updater.hpp>  // diagnostics
+#include <camera_info_manager/camera_info_manager.hpp>  // calibration file loading
 
 // arena sdk
 #include "ArenaApi.h"
@@ -216,6 +218,17 @@ class ArenaCameraNode : public rclcpp::Node
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_dolp_compressed_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_aolp_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_aolp_compressed_;
+  // Stokes parameter publishers (S0, S1, S2 — mono8 encoded)
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_stokes_s0_;
+  rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_stokes_s0_compressed_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_stokes_s1_;
+  rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_stokes_s1_compressed_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_stokes_s2_;
+  rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_stokes_s2_compressed_;
+  // False-color AoLP visualization (compressed BGR/HSV colormap)
+  rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_aolp_color_compressed_;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr m_pub_camera_info_;
+  std::unique_ptr<camera_info_manager::CameraInfoManager> m_camera_info_manager_;
   rclcpp::TimerBase::SharedPtr m_wait_for_device_timer_callback_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr m_trigger_an_image_srv_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr m_param_callback_handle_;
@@ -338,6 +351,24 @@ class ArenaCameraNode : public rclcpp::Node
   bool publish_pol_max_;       // Publish max-combined polarization image
   bool publish_dolp_;
   bool publish_aolp_;
+  bool publish_stokes_;           // Publish S0/S1/S2 Stokes parameter images
+  bool publish_aolp_color_;       // Publish false-color HSV AoLP visualization
+  std::string camera_info_url_;  // URL to camera calibration file (empty = uncalibrated stub)
+  // Latency profiling
+  std::string latency_mode_;      // "off" | "callback" | "hardware" | "both"
+  bool profile_latency_{false};             // true when any latency mode is active
+  bool use_hw_timestamp_for_latency_{false}; // true when "hardware" or "both"
+  // m_callback_t0_ns_: nanoseconds from steady_clock epoch, set in handle_camera_image_
+  std::atomic<int64_t> m_callback_t0_ns_{0};
+  std::atomic<double> m_last_callback_latency_ms_{0.0};
+  std::atomic<double> m_last_hw_latency_ms_{0.0};
+
+  // Camera reconnection
+  int reconnect_max_attempts_;    // 0 = infinite retries
+  std::atomic<bool> m_reconnecting_{false};
+  uint64_t m_reconnect_count_{0};
+  uint64_t m_reconnect_errors_{0};
+  void reconnect_();
   
   // Debug display window (OpenCV imshow)
   bool display_images_;               // Config: show tiled debug window

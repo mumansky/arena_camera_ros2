@@ -438,6 +438,16 @@ void ArenaCameraNode::parse_parameters_()
     currentParam = "publish_aolp";
     publish_aolp_ = config_bool(m_config_params_, "publish_aolp", false);
 
+    currentParam = "publish_stokes";
+    publish_stokes_ = config_bool(m_config_params_, "publish_stokes", false);
+
+    currentParam = "publish_aolp_color";
+    publish_aolp_color_ = config_bool(m_config_params_, "publish_aolp_color", false);
+    if (publish_aolp_color_ && (!publish_dolp_ || !publish_aolp_)) {
+      log_warn("publish_aolp_color requires publish_dolp: true and publish_aolp: true — disabling");
+      publish_aolp_color_ = false;
+    }
+
     currentParam = "profile_processing";
     profile_processing_ = config_bool(m_config_params_, "profile_processing", false);
     if (profile_processing_) {
@@ -466,6 +476,23 @@ void ArenaCameraNode::parse_parameters_()
     // Watchdog settings (Task 20)
     currentParam = "watchdog_timeout_sec";
     watchdog_timeout_sec_ = config_double(m_config_params_, "watchdog_timeout_sec", 5.0);
+
+    // Camera info / calibration
+    currentParam = "camera_info_url";
+    camera_info_url_ = config_string(m_config_params_, "camera_info_url", "");
+
+    // Latency profiling
+    currentParam = "latency_mode";
+    latency_mode_ = config_string(m_config_params_, "latency_mode", "off");
+    profile_latency_ = (latency_mode_ != "off");
+    use_hw_timestamp_for_latency_ = (latency_mode_ == "hardware" || latency_mode_ == "both");
+    if (profile_latency_) {
+      log_info("Latency profiling enabled: mode=" + latency_mode_);
+    }
+
+    // Camera reconnection
+    currentParam = "reconnect_max_attempts";
+    reconnect_max_attempts_ = config_int(m_config_params_, "reconnect_max_attempts", 0);
 
   } catch (std::exception& e) {
     log_err("Error parsing parameter '" + currentParam + "': " + std::string(e.what()) +
@@ -629,6 +656,53 @@ void ArenaCameraNode::initialize_()
     if (publish_compressed_) {
       m_pub_aolp_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
           topic_ + "/aolp/compressed", pub_qos_);
+    }
+  }
+
+  // Create publishers for Stokes parameters (S0, S1, S2) — polarized cameras only
+  if (is_polarized && publish_stokes_) {
+    if (publish_raw_) {
+      m_pub_stokes_s0_ = this->create_publisher<sensor_msgs::msg::Image>(
+          topic_ + "/stokes_s0", pub_qos_);
+      m_pub_stokes_s1_ = this->create_publisher<sensor_msgs::msg::Image>(
+          topic_ + "/stokes_s1", pub_qos_);
+      m_pub_stokes_s2_ = this->create_publisher<sensor_msgs::msg::Image>(
+          topic_ + "/stokes_s2", pub_qos_);
+    }
+    if (publish_compressed_) {
+      m_pub_stokes_s0_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
+          topic_ + "/stokes_s0/compressed", pub_qos_);
+      m_pub_stokes_s1_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
+          topic_ + "/stokes_s1/compressed", pub_qos_);
+      m_pub_stokes_s2_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
+          topic_ + "/stokes_s2/compressed", pub_qos_);
+    }
+  }
+
+  // Create publisher for false-color AoLP visualization
+  if (is_polarized && publish_aolp_color_) {
+    m_pub_aolp_color_compressed_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
+        topic_ + "/aolp_color/compressed", pub_qos_);
+  }
+
+  // CameraInfo publisher — always created; publishes once per frame with matching header.
+  // Provides uncalibrated stub (all-zero K/D/R/P) unless camera_info_url is set.
+  m_pub_camera_info_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(
+      topic_ + "/camera_info", pub_qos_);
+  {
+    // Camera name defaults to the node name; CameraInfoManager uses it as the calibration key.
+    std::string cam_name = std::string(this->get_name());
+    m_camera_info_manager_ = std::make_unique<camera_info_manager::CameraInfoManager>(
+        this, cam_name, camera_info_url_);
+    if (!camera_info_url_.empty()) {
+      if (m_camera_info_manager_->isCalibrated()) {
+        log_info("Camera calibration loaded from: " + camera_info_url_);
+      } else {
+        log_warn("camera_info_url set but calibration failed to load: " + camera_info_url_ +
+                 " — publishing uncalibrated stub");
+      }
+    } else {
+      log_info("No camera_info_url set — publishing uncalibrated CameraInfo stub");
     }
   }
 
@@ -964,10 +1038,20 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
     dolp_u8.create(raw_h, raw_w, CV_8U);
     aolp_u8.create(raw_h, raw_w, CV_8U);
 
+    cv::Mat s0_u8, s1_u8, s2_u8;
+    uint8_t* s0_ptr = nullptr, *s1_ptr = nullptr, *s2_ptr = nullptr;
+    if (publish_stokes_) {
+      s0_u8.create(raw_h, raw_w, CV_8U);
+      s1_u8.create(raw_h, raw_w, CV_8U);
+      s2_u8.create(raw_h, raw_w, CV_8U);
+      s0_ptr = s0_u8.data; s1_ptr = s1_u8.data; s2_ptr = s2_u8.data;
+    }
+
     gpu_ok = polar_compute_gpu(
       raw_ch, raw_w, raw_h,
       dolp_u8.data, aolp_u8.data,
-      polar_bufs_);
+      polar_bufs_,
+      s0_ptr, s1_ptr, s2_ptr);
 
     if (!gpu_ok) {
       log_warn("CUDA polarization kernel failed — falling back to CPU this frame");
@@ -978,6 +1062,35 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
     dtimer.mark("stokes");
     dtimer.mark("dolp");
     dtimer.mark("aolp");
+
+    if (gpu_ok && publish_stokes_) {
+      // Helper lambda to publish one Stokes component as raw + compressed
+      auto pub_stokes = [&](cv::Mat& img,
+                            rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr& raw_pub,
+                            rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr& cmp_pub) {
+        if (publish_raw_ && raw_pub) {
+          auto msg = std::make_unique<sensor_msgs::msg::Image>();
+          fill_header_(msg->header, pImage);
+          msg->height = static_cast<uint32_t>(raw_h);
+          msg->width  = static_cast<uint32_t>(raw_w);
+          msg->encoding = "mono8"; msg->is_bigendian = 0;
+          msg->step = static_cast<uint32_t>(raw_w);
+          msg->data.assign(img.data, img.data + img.total());
+          raw_pub->publish(std::move(msg));
+        }
+        if (publish_compressed_ && cmp_pub) {
+          auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+          fill_header_(msg->header, pImage);
+          msg->format = "jpeg";
+          jpeg_encode_(img, msg->data);
+          cmp_pub->publish(std::move(msg));
+        }
+      };
+      pub_stokes(s0_u8, m_pub_stokes_s0_, m_pub_stokes_s0_compressed_);
+      pub_stokes(s1_u8, m_pub_stokes_s1_, m_pub_stokes_s1_compressed_);
+      pub_stokes(s2_u8, m_pub_stokes_s2_, m_pub_stokes_s2_compressed_);
+      dtimer.mark("stokes_pub");
+    }
   }
 
   if (gpu_ok) {
@@ -1018,6 +1131,27 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
         jpeg_encode_(aolp_u8, msg->data);
         m_pub_aolp_compressed_->publish(std::move(msg));
       }
+    }
+    // Publish false-color AoLP (HSV: H=angle, S=DOLP, V=200)
+    if (publish_aolp_color_ && m_pub_aolp_color_compressed_ &&
+        !aolp_u8.empty() && !dolp_u8.empty()) {
+      cv::Mat hsv(raw_h, raw_w, CV_8UC3);
+      for (int i = 0; i < raw_h * raw_w; ++i) {
+        // H: AoLP [0,255] remapped to [0,180] (OpenCV hue range)
+        hsv.data[i * 3 + 0] = static_cast<uint8_t>(aolp_u8.data[i] * 180 / 255);
+        // S: DOLP directly [0,255]
+        hsv.data[i * 3 + 1] = dolp_u8.data[i];
+        // V: fixed brightness
+        hsv.data[i * 3 + 2] = 200;
+      }
+      cv::Mat bgr;
+      cv::cvtColor(hsv, bgr, cv::COLOR_HSV2BGR);
+      auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+      fill_header_(msg->header, pImage);
+      msg->format = "jpeg";
+      jpeg_encode_(bgr, msg->data);
+      m_pub_aolp_color_compressed_->publish(std::move(msg));
+      dtimer.mark("aolp_color");
     }
   } else {
 #else
@@ -1111,6 +1245,69 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
       }
     }
     dtimer.mark("aolp");
+
+    // --- Stokes outputs (CPU path) ---
+    if (publish_stokes_) {
+      // S0 = f0 + f90 ∈ [0,510] → scale 0.5 → [0,255]
+      cv::Mat s0_f = S0 * 0.5f;
+      cv::min(s0_f, 255.0f, s0_f);
+      cv::Mat s0_u8; s0_f.convertTo(s0_u8, CV_8U);
+
+      // S1 = f0 - f90 ∈ [-255,255] → (x+255)/2 → [0,255]
+      cv::Mat s1_f = (S1 + 255.0f) * 0.5f;
+      cv::min(cv::max(s1_f, 0.0f), 255.0f, s1_f);
+      cv::Mat s1_u8; s1_f.convertTo(s1_u8, CV_8U);
+
+      // S2 = f45 - f135 → same encoding as S1
+      cv::Mat s2_f = (S2 + 255.0f) * 0.5f;
+      cv::min(cv::max(s2_f, 0.0f), 255.0f, s2_f);
+      cv::Mat s2_u8; s2_f.convertTo(s2_u8, CV_8U);
+
+      auto pub_stokes = [&](cv::Mat& img,
+                            rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr& raw_pub,
+                            rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr& cmp_pub) {
+        if (publish_raw_ && raw_pub) {
+          auto msg = std::make_unique<sensor_msgs::msg::Image>();
+          fill_header_(msg->header, pImage);
+          msg->height = static_cast<uint32_t>(stokes_h);
+          msg->width  = static_cast<uint32_t>(stokes_w);
+          msg->encoding = "mono8"; msg->is_bigendian = 0;
+          msg->step = static_cast<uint32_t>(stokes_w);
+          msg->data.assign(img.data, img.data + img.total());
+          raw_pub->publish(std::move(msg));
+        }
+        if (publish_compressed_ && cmp_pub) {
+          auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+          fill_header_(msg->header, pImage);
+          msg->format = "jpeg";
+          jpeg_encode_(img, msg->data);
+          cmp_pub->publish(std::move(msg));
+        }
+      };
+      pub_stokes(s0_u8, m_pub_stokes_s0_, m_pub_stokes_s0_compressed_);
+      pub_stokes(s1_u8, m_pub_stokes_s1_, m_pub_stokes_s1_compressed_);
+      pub_stokes(s2_u8, m_pub_stokes_s2_, m_pub_stokes_s2_compressed_);
+      dtimer.mark("stokes_pub");
+    }
+
+    // --- False-color AoLP (CPU path) ---
+    if (publish_aolp_color_ && m_pub_aolp_color_compressed_ &&
+        !aolp_u8.empty() && !dolp_u8.empty()) {
+      cv::Mat hsv(stokes_h, stokes_w, CV_8UC3);
+      for (int i = 0; i < static_cast<int>(stokes_h * stokes_w); ++i) {
+        hsv.data[i * 3 + 0] = static_cast<uint8_t>(aolp_u8.data[i] * 180 / 255);
+        hsv.data[i * 3 + 1] = dolp_u8.data[i];
+        hsv.data[i * 3 + 2] = 200;
+      }
+      cv::Mat bgr;
+      cv::cvtColor(hsv, bgr, cv::COLOR_HSV2BGR);
+      auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+      fill_header_(msg->header, pImage);
+      msg->format = "jpeg";
+      jpeg_encode_(bgr, msg->data);
+      m_pub_aolp_color_compressed_->publish(std::move(msg));
+      dtimer.mark("aolp_color");
+    }
   }  // end CPU fallback
 
   // Log DOLP/AoLP profiling detail if enabled
@@ -1223,6 +1420,48 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
     }
 
     m_images_published_++;
+
+    // --- Publish CameraInfo (once per frame, always) ---
+    if (m_pub_camera_info_ && m_camera_info_manager_) {
+      auto info_msg = m_camera_info_manager_->getCameraInfo();
+      fill_header_(info_msg.header, pImage);
+      info_msg.width = static_cast<uint32_t>(pImage->GetWidth());
+      info_msg.height = static_cast<uint32_t>(pImage->GetHeight());
+      m_pub_camera_info_->publish(info_msg);
+    }
+
+    // --- Latency profiling ---
+    if (profile_latency_) {
+      auto t1 = std::chrono::steady_clock::now();
+      // Callback latency: Arena callback entry → publish
+      int64_t t0_ns = m_callback_t0_ns_.load(std::memory_order_relaxed);
+      if (t0_ns != 0) {
+        auto t0 = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(t0_ns));
+        double cb_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        m_last_callback_latency_ms_.store(cb_ms, std::memory_order_relaxed);
+        if (latency_mode_ == "callback" || latency_mode_ == "both") {
+          log_debug("Frame " + std::to_string(pImage->GetFrameId()) +
+                    " callback_latency=" + std::to_string(cb_ms) + "ms");
+        }
+      }
+      // Hardware latency: camera hardware timestamp → publish
+      if (use_hw_timestamp_for_latency_) {
+        uint64_t hw_ts_ns = pImage->GetTimestampNs();
+        if (hw_ts_ns != 0) {
+          // Hardware timestamps use camera clock; compare using wall clock epoch if PTP-synced.
+          // For a best-effort estimate, compute using the ROS system clock.
+          auto now_ns = static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::system_clock::now().time_since_epoch()).count());
+          if (now_ns > hw_ts_ns) {
+            double hw_ms = static_cast<double>(now_ns - hw_ts_ns) / 1e6;
+            m_last_hw_latency_ms_.store(hw_ms, std::memory_order_relaxed);
+            log_debug("Frame " + std::to_string(pImage->GetFrameId()) +
+                      " hw_latency=" + std::to_string(hw_ms) + "ms");
+          }
+        }
+      }
+    }
 
     // Note: FPS / watchdog bookkeeping is handled in handle_camera_image_() (the
     // callback on the grab thread) so that timestamps are accurate even when the
@@ -1593,6 +1832,15 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
     // Deep-copy the image so the SDK buffer is released immediately when
     // this callback returns.  ImageFactory::Copy is a fast memcpy.
     Arena::IImage* copy = Arena::ImageFactory::Copy(pImage);
+
+    // Record callback-entry timestamp for latency profiling (if enabled).
+    // Stored as ns since epoch so it can be read atomically by the worker thread.
+    if (profile_latency_) {
+      auto t0 = std::chrono::steady_clock::now();
+      m_callback_t0_ns_.store(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(t0.time_since_epoch()).count(),
+          std::memory_order_relaxed);
+    }
 
     {
       std::lock_guard<std::mutex> lock(m_worker_mutex_);
@@ -2488,7 +2736,11 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
     log_err("Watchdog: Camera appears frozen - no new frames for " +
             std::to_string(elapsed_since_last_frame) + "s (timeout: " +
             std::to_string(watchdog_timeout_sec_) + "s). Last frame " +
-            std::to_string(m_images_published_) + " published.");
+            std::to_string(m_images_published_) + " published. Attempting reconnect...");
+    // Trigger reconnection on a detached thread so the diagnostics callback returns fast.
+    if (!m_reconnecting_.load()) {
+      std::thread(&ArenaCameraNode::reconnect_, this).detach();
+    }
   }
 
   if (m_device_connected_) {
@@ -2545,6 +2797,24 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
     stat.add("Time Since Last Frame (sec)", std::to_string(elapsed_since_last_frame));
   } else {
     stat.add("Time Since Last Frame (sec)", "N/A (no frames yet)");
+  }
+
+  // Reconnection metrics
+  stat.add("Reconnect Count", std::to_string(m_reconnect_count_));
+  stat.add("Reconnect Errors", std::to_string(m_reconnect_errors_));
+  stat.add("Reconnecting Now", m_reconnecting_.load() ? "true" : "false");
+
+  // Latency profiling metrics
+  if (profile_latency_) {
+    stat.add("Latency Mode", latency_mode_);
+    if (latency_mode_ == "callback" || latency_mode_ == "both") {
+      stat.add("Callback Latency Last (ms)",
+               std::to_string(m_last_callback_latency_ms_.load(std::memory_order_relaxed)));
+    }
+    if (use_hw_timestamp_for_latency_) {
+      stat.add("HW Latency Last (ms)",
+               std::to_string(m_last_hw_latency_ms_.load(std::memory_order_relaxed)));
+    }
   }
 
   if (m_device_connected_) {
@@ -2646,4 +2916,180 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
               std::chrono::steady_clock::now() - m_last_diag_genicam_read_time_).count()));
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// reconnect_() — Structured teardown + re-init for frozen camera recovery.
+// Called on a detached thread from produce_diagnostics_ when watchdog fires.
+// ---------------------------------------------------------------------------
+void ArenaCameraNode::reconnect_()
+{
+  // Guard against concurrent reconnect attempts
+  bool expected = false;
+  if (!m_reconnecting_.compare_exchange_strong(expected, true)) {
+    return;  // another reconnect is already in progress
+  }
+
+  m_reconnect_count_++;
+  log_info("Reconnect attempt #" + std::to_string(m_reconnect_count_) + " starting...");
+
+  // -------------------------------------------------------------------------
+  // Step 1: Teardown — mirrors the destructor, but without closing the system
+  // -------------------------------------------------------------------------
+
+  // Stop worker thread
+  {
+    std::lock_guard<std::mutex> lock(m_worker_mutex_);
+    m_worker_stop_ = true;
+  }
+  m_worker_cv_.notify_one();
+  if (m_worker_thread_.joinable()) {
+    m_worker_thread_.join();
+    log_info("Reconnect: worker thread stopped");
+  }
+  // Discard any pending image
+  if (m_pending_image_) {
+    Arena::ImageFactory::Destroy(m_pending_image_);
+    m_pending_image_ = nullptr;
+  }
+
+  // Deregister image callback
+  if (m_image_callback_handler_ && m_pDevice) {
+    try {
+      m_pDevice->DeregisterImageCallback(m_image_callback_handler_.get());
+      m_image_callback_handler_.reset();
+      log_info("Reconnect: image callback deregistered");
+    } catch (...) {
+      log_warn("Reconnect: failed to deregister image callback (continuing)");
+    }
+  }
+
+  // Stop streaming
+  bool was_streaming = m_is_streaming_.exchange(false);
+  if (m_pDevice && was_streaming) {
+    try {
+      m_pDevice->StopStream();
+      log_info("Reconnect: stream stopped");
+    } catch (...) {
+      log_warn("Reconnect: failed to stop stream (continuing)");
+    }
+  }
+
+  // Destroy device
+  if (m_pDevice && m_pSystem) {
+    try {
+      Arena::IDevice* pDevice = m_pDevice.get();
+      m_pDevice.reset();
+      m_pSystem->DestroyDevice(pDevice);
+      log_info("Reconnect: device destroyed");
+    } catch (...) {
+      log_warn("Reconnect: failed to destroy device (continuing)");
+      m_pDevice.reset();
+    }
+  }
+  m_device_connected_ = false;
+
+  // Short delay to let the camera hardware reset
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  // -------------------------------------------------------------------------
+  // Step 2: Re-discover and re-create device
+  // -------------------------------------------------------------------------
+  constexpr int RECONNECT_RETRY_DELAY_SEC = 3;
+  int attempt = 0;
+  bool success = false;
+
+  while (rclcpp::ok()) {
+    attempt++;
+    if (reconnect_max_attempts_ > 0 && attempt > reconnect_max_attempts_) {
+      log_err("Reconnect: gave up after " + std::to_string(reconnect_max_attempts_) +
+              " attempts. Node requires manual restart.");
+      m_reconnect_errors_++;
+      m_reconnecting_.store(false);
+      return;
+    }
+
+    log_info("Reconnect: device discovery attempt " + std::to_string(attempt) + "...");
+    try {
+      m_pSystem->UpdateDevices(100);
+      auto device_infos = m_pSystem->GetDevices();
+      if (device_infos.empty()) {
+        log_info("Reconnect: no cameras found — retrying in " +
+                 std::to_string(RECONNECT_RETRY_DELAY_SEC) + "s...");
+        std::this_thread::sleep_for(std::chrono::seconds(RECONNECT_RETRY_DELAY_SEC));
+        continue;
+      }
+
+      // create_device_ros_ selects the correct camera (by serial if set)
+      auto* pDevice = create_device_ros_();
+      m_pDevice = std::shared_ptr<Arena::IDevice>(pDevice, [](Arena::IDevice*) { /* no-op */ });
+      success = true;
+      log_info("Reconnect: camera found and device created");
+      break;
+    } catch (const std::exception& e) {
+      m_reconnect_errors_++;
+      log_warn("Reconnect attempt " + std::to_string(attempt) +
+               " failed: " + e.what() + " — retrying in " +
+               std::to_string(RECONNECT_RETRY_DELAY_SEC) + "s...");
+      std::this_thread::sleep_for(std::chrono::seconds(RECONNECT_RETRY_DELAY_SEC));
+    }
+  }
+
+  if (!success) {
+    log_err("Reconnect: aborted (rclcpp shutdown)");
+    m_reconnecting_.store(false);
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Step 3: Re-configure and restart stream
+  // -------------------------------------------------------------------------
+  try {
+    set_nodes_();
+
+    // StartStream with retry (same logic as run_())
+    constexpr int MAX_STREAM_START_ATTEMPTS = 3;
+    constexpr int STREAM_RETRY_DELAY_MS = 2000;
+    for (int sa = 1; sa <= MAX_STREAM_START_ATTEMPTS; ++sa) {
+      try {
+        m_pDevice->StartStream(stream_buffer_count_);
+        m_is_streaming_.store(true);
+        break;
+      } catch (const std::exception& e) {
+        if (sa < MAX_STREAM_START_ATTEMPTS) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(STREAM_RETRY_DELAY_MS));
+        } else {
+          throw;
+        }
+      }
+    }
+
+    m_device_connected_ = true;
+
+    if (!trigger_mode_activated_) {
+      m_image_callback_handler_ = std::make_unique<ImageCallbackHandler>(this);
+      m_pDevice->RegisterImageCallback(m_image_callback_handler_.get());
+      {
+        std::lock_guard<std::mutex> lock(m_worker_mutex_);
+        m_worker_stop_ = false;
+        m_worker_has_image_ = false;
+      }
+      m_worker_thread_ = std::thread(&ArenaCameraNode::worker_thread_func_, this);
+    }
+
+    // Reset watchdog state so the watchdog doesn't immediately re-trigger
+    {
+      std::lock_guard<std::mutex> slock(m_stats_mutex_);
+      m_camera_frozen_ = false;
+      m_watchdog_initialized_ = false;
+      m_last_frame_time_ = std::chrono::steady_clock::now();
+    }
+
+    log_info("Reconnect #" + std::to_string(m_reconnect_count_) + " successful — streaming resumed");
+  } catch (const std::exception& e) {
+    m_reconnect_errors_++;
+    log_err("Reconnect: failed to restart stream: " + std::string(e.what()));
+  }
+
+  m_reconnecting_.store(false);
 }
