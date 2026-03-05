@@ -72,7 +72,7 @@
 #include "arena_image_raii.h"
 #include "light_arena/deviceinfo_helper.h"
 #include "rclcpp_adapter/pixelformat_translation.h"
-#include "rclcpp_adapter/quality_of_service_translation.cpp"
+#include "rclcpp_adapter/quality_of_service_translation.h"
 
 // ============================================================================
 // Pixel Format Constants
@@ -297,13 +297,22 @@ static int config_int(const YAML::Node& config, const std::string& key, int defa
 
 /**
  * @brief Helper to check if a key exists in YAML config
- * @param config YAML node to check
- * @param key Parameter key name
- * @return true if key exists, false otherwise
+ * @return true if the key is present in the map (including if its value is YAML null).
+ * @note Use config_has_value() when you also need the value to be non-null.
  */
 static bool config_has(const YAML::Node& config, const std::string& key)
 {
   return config && config[key];
+}
+
+/**
+ * @brief Helper to check if a key exists and has a non-null value in YAML config.
+ * Unlike config_has(), returns false for keys whose value is YAML null (e.g. "key: ~").
+ * Use this when a null value should be treated the same as a missing key.
+ */
+static bool config_has_value(const YAML::Node& config, const std::string& key)
+{
+  return config && config[key] && !config[key].IsNull();
 }
 
 void ArenaCameraNode::parse_parameters_()
@@ -357,7 +366,7 @@ void ArenaCameraNode::parse_parameters_()
 
     currentParam = "short_exposure_enable";
     short_exposure_enable_ = config_bool(m_config_params_, "short_exposure_enable", false);
-    is_passed_short_exposure_enable_ = config_has(m_config_params_, "short_exposure_enable");
+    is_passed_short_exposure_enable_ = config_has_value(m_config_params_, "short_exposure_enable");
 
     currentParam = "exposure_auto_algorithm";
     exposure_auto_algorithm_ = config_string(m_config_params_, "exposure_auto_algorithm", "");
@@ -385,7 +394,7 @@ void ArenaCameraNode::parse_parameters_()
 
     currentParam = "acquisition_frame_rate_enable";
     acquisition_frame_rate_enable_ = config_bool(m_config_params_, "acquisition_frame_rate_enable", false);
-    is_passed_acquisition_frame_rate_enable_ = config_has(m_config_params_, "acquisition_frame_rate_enable");
+    is_passed_acquisition_frame_rate_enable_ = config_has_value(m_config_params_, "acquisition_frame_rate_enable");
 
     currentParam = "acquisition_frame_rate";
     acquisition_frame_rate_ = config_double(m_config_params_, "acquisition_frame_rate", -1.0);
@@ -404,7 +413,7 @@ void ArenaCameraNode::parse_parameters_()
 
     currentParam = "qos_history_depth";
     pub_qos_history_depth_ = static_cast<size_t>(config_int64(m_config_params_, "qos_history_depth", 0));
-    is_passed_pub_qos_history_depth_ = config_has(m_config_params_, "qos_history_depth") && pub_qos_history_depth_ > 0;
+    is_passed_pub_qos_history_depth_ = config_has_value(m_config_params_, "qos_history_depth") && pub_qos_history_depth_ > 0;
 
     currentParam = "qos_reliability";
     pub_qos_reliability_ = config_string(m_config_params_, "qos_reliability", "");

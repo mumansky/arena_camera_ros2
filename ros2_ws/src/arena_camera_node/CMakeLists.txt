@@ -332,6 +332,7 @@ if(BUILD_TESTING)
   # QoS translation tests
   ament_add_gtest(test_qos_translation
     test/test_qos_translation.cpp
+    src/rclcpp_adapter/quality_of_service_translation.cpp
   )
   target_include_directories(test_qos_translation PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src

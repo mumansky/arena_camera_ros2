@@ -77,6 +77,11 @@ static bool config_has(const YAML::Node& config, const std::string& key)
   return config && config[key];
 }
 
+static bool config_has_value(const YAML::Node& config, const std::string& key)
+{
+  return config && config[key] && !config[key].IsNull();
+}
+
 // ============================================================================
 // Replicate pixel format constants and helpers from ArenaCameraNode.cpp
 // ============================================================================
@@ -264,6 +269,45 @@ TEST(ConfigHelpersTest, ConfigHasReturnsTrueOnExplicitlyNullValue)
   // rather than throwing, so config_string will NOT fall back to the default.
   YAML::Node config = YAML::Load("key: ~");
   EXPECT_TRUE(config_has(config, "key"));
+}
+
+// ============================================================================
+// Tests for config_has_value (key present AND non-null)
+// ============================================================================
+
+TEST(ConfigHelpersTest, ConfigHasValueReturnsTrueWhenPresent)
+{
+  YAML::Node config;
+  config["key"] = "value";
+  EXPECT_TRUE(config_has_value(config, "key"));
+}
+
+TEST(ConfigHelpersTest, ConfigHasValueReturnsFalseWhenMissing)
+{
+  YAML::Node config;
+  EXPECT_FALSE(config_has_value(config, "key"));
+}
+
+TEST(ConfigHelpersTest, ConfigHasValueReturnsFalseOnExplicitlyNullValue)
+{
+  // Unlike config_has, a null value (key: ~) is treated as absent.
+  YAML::Node config = YAML::Load("key: ~");
+  EXPECT_FALSE(config_has_value(config, "key"));
+}
+
+TEST(ConfigHelpersTest, ConfigHasValueReturnsTrueForBoolFalse)
+{
+  // A bool false is a valid non-null value — must not be confused with "absent".
+  YAML::Node config;
+  config["acquisition_frame_rate_enable"] = false;
+  EXPECT_TRUE(config_has_value(config, "acquisition_frame_rate_enable"));
+}
+
+TEST(ConfigHelpersTest, ConfigHasValueReturnsTrueForZeroInt)
+{
+  YAML::Node config;
+  config["stream_buffer_count"] = 0;
+  EXPECT_TRUE(config_has_value(config, "stream_buffer_count"));
 }
 
 // ============================================================================

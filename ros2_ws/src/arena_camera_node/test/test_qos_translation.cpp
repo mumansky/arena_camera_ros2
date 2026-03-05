@@ -7,7 +7,7 @@
 #include <string>
 
 // Include the QoS translation header
-#include "rclcpp_adapter/quality_of_service_translation.cpp"
+#include "rclcpp_adapter/quality_of_service_translation.h"
 
 /**
  * @brief Test reliability policy string to enum mapping
