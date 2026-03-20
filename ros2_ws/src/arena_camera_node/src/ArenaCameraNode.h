@@ -338,6 +338,9 @@ class ArenaCameraNode : public rclcpp::Node
   bool display_images_;               // Config: show tiled debug window
   std::atomic<bool> display_images_active_{false}; // Runtime: toggled off by 'q' keypress (atomic for thread safety)
   std::string save_session_dir_;      // Created on first 's' keypress
+  bool m_display_undistorted_{false}; // 'u' toggle: apply fisheye undistortion to display tiles
+  bool m_undistort_maps_ready_{false};
+  cv::Mat m_undistort_map1_, m_undistort_map2_;
   
   int jpeg_quality_;  // JPEG compression quality (1-100, default 80)
   

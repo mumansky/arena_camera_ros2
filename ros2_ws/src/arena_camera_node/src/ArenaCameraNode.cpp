@@ -1189,6 +1189,35 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                 }
                 
                 if (tile_w > 0 && tile_h > 0) {
+                  // Build fisheye undistortion maps once from calibration
+                  if (!m_undistort_maps_ready_ && m_camera_info_manager_ &&
+                      m_camera_info_manager_->isCalibrated()) {
+                    auto ci = m_camera_info_manager_->getCameraInfo();
+                    if (ci.distortion_model == "equidistant" && ci.d.size() == 4) {
+                      cv::Mat K = (cv::Mat_<double>(3, 3) <<
+                          ci.k[0], ci.k[1], ci.k[2],
+                          ci.k[3], ci.k[4], ci.k[5],
+                          ci.k[6], ci.k[7], ci.k[8]);
+                      cv::Mat D = (cv::Mat_<double>(1, 4) <<
+                          ci.d[0], ci.d[1], ci.d[2], ci.d[3]);
+                      cv::fisheye::initUndistortRectifyMap(
+                          K, D, cv::Mat::eye(3, 3, CV_64F), K,
+                          cv::Size(tile_w, tile_h), CV_16SC2,
+                          m_undistort_map1_, m_undistort_map2_);
+                      m_undistort_maps_ready_ = true;
+                      log_info("Fisheye undistortion maps built for debug display");
+                    }
+                  }
+
+                  // Optionally remap a mat through the undistortion maps
+                  auto maybe_undistort = [&](const cv::Mat& src) -> cv::Mat {
+                    if (!m_display_undistorted_ || !m_undistort_maps_ready_ || src.empty())
+                      return src;
+                    cv::Mat dst;
+                    cv::remap(src, dst, m_undistort_map1_, m_undistort_map2_, cv::INTER_LINEAR);
+                    return dst;
+                  };
+
                   // Scale tiles down for display — target ~1920px wide for 4 columns
                   int target_tile_w = 480;
                   double scale = static_cast<double>(target_tile_w) / tile_w;
@@ -1213,14 +1242,15 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                     return display;
                   };
                   
-                  // Build tiles
-                  cv::Mat t0   = to_display_tile(display_ch[0], "0 deg");
-                  cv::Mat t45  = to_display_tile(display_ch[1], "45 deg");
-                  cv::Mat t90  = to_display_tile(display_ch[2], "90 deg");
-                  cv::Mat t135 = to_display_tile(display_ch[3], "135 deg");
-                  cv::Mat tmax = to_display_tile(display_max, "Max Combined");
-                  cv::Mat tdolp = to_display_tile(display_dolp, "DOLP");
-                  cv::Mat taolp = to_display_tile(display_aolp, "AoLP");
+                  // Build tiles (with optional fisheye undistortion)
+                  std::string undist_suffix = m_display_undistorted_ ? " [U]" : "";
+                  cv::Mat t0   = to_display_tile(maybe_undistort(display_ch[0]), "0 deg" + undist_suffix);
+                  cv::Mat t45  = to_display_tile(maybe_undistort(display_ch[1]), "45 deg" + undist_suffix);
+                  cv::Mat t90  = to_display_tile(maybe_undistort(display_ch[2]), "90 deg" + undist_suffix);
+                  cv::Mat t135 = to_display_tile(maybe_undistort(display_ch[3]), "135 deg" + undist_suffix);
+                  cv::Mat tmax = to_display_tile(maybe_undistort(display_max), "Max Combined" + undist_suffix);
+                  cv::Mat tdolp = to_display_tile(maybe_undistort(display_dolp), "DOLP" + undist_suffix);
+                  cv::Mat taolp = to_display_tile(maybe_undistort(display_aolp), "AoLP" + undist_suffix);
                   cv::Mat tblank = cv::Mat::zeros(scaled_h, scaled_w, CV_8UC3);
                   // Overlay diagnostics info on the info tile
                   {
@@ -1250,6 +1280,11 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                     put_line("CalcMean: " + cache_value("CalculatedMean"));
                     
                     y += 10;  // spacer
+                    std::string undist_status = m_undistort_maps_ready_
+                        ? (m_display_undistorted_ ? "ON" : "off")
+                        : "no cal";
+                    put_line("Undistort [u]: " + undist_status,
+                             m_display_undistorted_ ? cv::Scalar(0, 255, 100) : cv::Scalar(100, 100, 100));
                     put_line("'s' save | 'q' quit", cv::Scalar(100, 100, 100));
                   }
                   
@@ -1262,7 +1297,15 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                   cv::imshow("Polarization Debug", tiled);
                   int key = cv::waitKey(1) & 0xFF;
                   
-                  if (key == 'q' || key == 'Q') {
+                  if (key == 'u' || key == 'U') {
+                    if (m_undistort_maps_ready_) {
+                      m_display_undistorted_ = !m_display_undistorted_;
+                      log_info(std::string("Debug display undistortion ") +
+                               (m_display_undistorted_ ? "enabled" : "disabled"));
+                    } else {
+                      log_warn("No calibration loaded — undistortion unavailable");
+                    }
+                  } else if (key == 'q' || key == 'Q') {
                     display_images_active_ = false;
                     cv::destroyAllWindows();
                     cv::waitKey(1);  // flush the destroy event so the window actually closes
@@ -1290,8 +1333,8 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                     std::string prefix = save_session_dir_ + "/" + ts_oss.str() +
                                          "_frame_" + std::to_string(frame_id) + "_";
                     
-                    // Save full-resolution images (not thumbnails)
-                    struct SavePair { const cv::Mat& mat; std::string name; };
+                    // Save full-resolution images — always both raw and undistorted
+                    struct SavePair { cv::Mat mat; std::string name; };
                     std::vector<SavePair> to_save = {
                       {display_ch[0], "pol_0deg"}, {display_ch[1], "pol_45deg"},
                       {display_ch[2], "pol_90deg"}, {display_ch[3], "pol_135deg"},
@@ -1302,6 +1345,13 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                       if (!sp.mat.empty()) {
                         cv::imwrite(prefix + sp.name + ".png", sp.mat);
                         saved++;
+                        if (m_undistort_maps_ready_) {
+                          cv::Mat undist;
+                          cv::remap(sp.mat, undist, m_undistort_map1_, m_undistort_map2_,
+                                    cv::INTER_LINEAR);
+                          cv::imwrite(prefix + sp.name + "_undist.png", undist);
+                          saved++;
+                        }
                       }
                     }
                     log_info("Saved " + std::to_string(saved) + " images to " + save_session_dir_ +
