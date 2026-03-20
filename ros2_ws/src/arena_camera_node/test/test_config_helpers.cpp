@@ -3,108 +3,16 @@
  * @brief Unit tests for YAML config helper functions and pixel format utilities
  *
  * Tests the safe config reading helpers (config_string, config_bool, etc.)
- * and pixel format detection functions (is_polarized_format, is_supported_format,
- * get_pixel_format_name, validate_bgr8_format).
+ * and pixel format detection functions (is_polarized_format,
+ * get_pixel_format_name).
  */
 
 #include <gtest/gtest.h>
-#include <yaml-cpp/yaml.h>
 #include <string>
 #include <cstdint>
 
-// ============================================================================
-// Replicate the config helper functions from ArenaCameraNode.cpp
-// These are static functions in the .cpp file, so we redefine them here for testing.
-// ============================================================================
-
-static std::string config_string(const YAML::Node& config, const std::string& key, const std::string& default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<std::string>();
-    }
-  } catch (const YAML::Exception&) {
-  }
-  return default_val;
-}
-
-static bool config_bool(const YAML::Node& config, const std::string& key, bool default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<bool>();
-    }
-  } catch (const YAML::Exception&) {
-  }
-  return default_val;
-}
-
-static double config_double(const YAML::Node& config, const std::string& key, double default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<double>();
-    }
-  } catch (const YAML::Exception&) {
-  }
-  return default_val;
-}
-
-static int64_t config_int64(const YAML::Node& config, const std::string& key, int64_t default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<int64_t>();
-    }
-  } catch (const YAML::Exception&) {
-  }
-  return default_val;
-}
-
-static int config_int(const YAML::Node& config, const std::string& key, int default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<int>();
-    }
-  } catch (const YAML::Exception&) {
-  }
-  return default_val;
-}
-
-static bool config_has(const YAML::Node& config, const std::string& key)
-{
-  return config && config[key];
-}
-
-// ============================================================================
-// Replicate pixel format constants and helpers from ArenaCameraNode.cpp
-// ============================================================================
-
-namespace PixelFormat {
-  constexpr uint64_t PFNC_POLARIZED_BAYER_RG8 = 0x8220020F;
-  constexpr uint64_t PFNC_BGR8 = 0x02180015;
-}
-
-inline bool is_polarized_format(uint64_t format) {
-  return format == PixelFormat::PFNC_POLARIZED_BAYER_RG8;
-}
-
-inline bool is_supported_format(uint64_t format) {
-  return true;
-}
-
-inline std::string get_pixel_format_name(uint64_t format) {
-  if (format == PixelFormat::PFNC_POLARIZED_BAYER_RG8) {
-    return "PolarizedAngles_0d_45d_90d_135d_BayerRG8";
-  } else if (format == PixelFormat::PFNC_BGR8) {
-    return "BGR8";
-  } else {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(format));
-    return std::string("Unknown (") + buf + ")";
-  }
-}
+#include "config_helpers.h"
+#include "pixel_format_helpers.h"
 
 // ============================================================================
 // Tests for config_string
@@ -273,14 +181,6 @@ TEST(PixelFormatTest, IsPolarizedFormatRejectsNonPolarized)
   EXPECT_FALSE(is_polarized_format(0x02180015));  // BGR8
   EXPECT_FALSE(is_polarized_format(0x00000000));
   EXPECT_FALSE(is_polarized_format(0xFFFFFFFF));
-}
-
-TEST(PixelFormatTest, IsSupportedFormatAcceptsAll)
-{
-  // Currently all formats are considered supported (conversion attempted)
-  EXPECT_TRUE(is_supported_format(0x8220020F));
-  EXPECT_TRUE(is_supported_format(0x02180015));
-  EXPECT_TRUE(is_supported_format(0x00000000));
 }
 
 TEST(PixelFormatTest, GetPixelFormatNameReturnsPolarized)
