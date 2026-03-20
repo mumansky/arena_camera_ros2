@@ -1241,20 +1241,27 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                     cv::waitKey(1);  // flush the destroy event so the window actually closes
                     log_info("Debug display window closed by user - press Ctrl+C to fully stop the node");
                   } else if (key == 's' || key == 'S') {
-                    // Create a new session directory on each save to avoid mixing sessions
                     auto now = std::chrono::system_clock::now();
                     auto time_t_now = std::chrono::system_clock::to_time_t(now);
-                    std::ostringstream oss;
                     struct tm local_tm {};
                     localtime_r(&time_t_now, &local_tm);
-                    oss << std::put_time(&local_tm, "%Y%m%d_%H%M%S");
-                    const char* home_env = getenv("HOME");
-                    std::string home = home_env ? home_env : "/tmp";
-                    save_session_dir_ = home + "/lucid_camera_images/session_" + oss.str();
-                    std::filesystem::create_directories(save_session_dir_);
-                    
+
+                    // Create the session folder once per run (on first save)
+                    if (save_session_dir_.empty()) {
+                      std::ostringstream session_oss;
+                      session_oss << std::put_time(&local_tm, "%Y%m%d_%H%M%S");
+                      const char* home_env = getenv("HOME");
+                      std::string home = home_env ? home_env : "/tmp";
+                      save_session_dir_ = home + "/lucid_camera_images/session_" + session_oss.str();
+                      std::filesystem::create_directories(save_session_dir_);
+                    }
+
+                    // Per-save timestamp + frame ID prefix
+                    std::ostringstream ts_oss;
+                    ts_oss << std::put_time(&local_tm, "%Y%m%d_%H%M%S");
                     uint64_t frame_id = pImage->GetFrameId();
-                    std::string prefix = save_session_dir_ + "/frame_" + std::to_string(frame_id) + "_";
+                    std::string prefix = save_session_dir_ + "/" + ts_oss.str() +
+                                         "_frame_" + std::to_string(frame_id) + "_";
                     
                     // Save full-resolution images (not thumbnails)
                     struct SavePair { const cv::Mat& mat; std::string name; };

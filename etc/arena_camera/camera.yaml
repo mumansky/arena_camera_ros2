@@ -138,7 +138,7 @@
     # Image Publishing Options
     # ------------------------
     # Control which image formats to publish
-    publish_raw: false       # Publish raw uncompressed images (sensor_msgs/Image)
+    publish_raw: true        # Publish raw uncompressed images (sensor_msgs/Image)
     publish_compressed: true  # Publish JPEG compressed images (sensor_msgs/CompressedImage)
     # Note: You can enable both to publish raw and compressed simultaneously
     # Compressed images are published to <topic>/compressed
