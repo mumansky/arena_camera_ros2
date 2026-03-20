@@ -317,6 +317,9 @@ void ArenaCameraNode::parse_parameters_()
     currentParam = "use_camera_timestamp";
     use_camera_timestamp_ = config_bool(m_config_params_, "use_camera_timestamp", false);
 
+    currentParam = "camera_info_url";
+    camera_info_url_ = config_string(m_config_params_, "camera_info_url", "");
+
     currentParam = "serial";
     serial_ = config_string(m_config_params_, "serial", "");
     is_passed_serial_ = !serial_.empty();
@@ -603,6 +606,22 @@ void ArenaCameraNode::initialize_()
           topic_ + "/aolp/compressed", pub_qos_);
     }
   }
+
+  // Camera info publisher + calibration manager
+  m_camera_info_manager_ = std::make_shared<camera_info_manager::CameraInfoManager>(
+      this, "arena_camera");
+  if (!camera_info_url_.empty()) {
+    if (m_camera_info_manager_->validateURL(camera_info_url_)) {
+      m_camera_info_manager_->loadCameraInfo(camera_info_url_);
+      log_info("Camera calibration loaded from: " + camera_info_url_);
+    } else {
+      log_warn("Invalid camera_info_url: " + camera_info_url_ + " — publishing uncalibrated camera_info");
+    }
+  } else {
+    log_info("No camera_info_url set — publishing uncalibrated camera_info");
+  }
+  m_camera_info_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(
+      topic_ + "/camera_info", pub_qos_);
 
   std::stringstream pub_qos_info;
   auto pub_qos_profile = pub_qos_.get_rmw_qos_profile();
@@ -1016,6 +1035,14 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
     }
 
     m_images_published_++;
+
+    // Publish camera_info with same timestamp/frame_id as the image
+    if (m_camera_info_pub_ && m_camera_info_manager_) {
+      auto ci = std::make_unique<sensor_msgs::msg::CameraInfo>(
+          m_camera_info_manager_->getCameraInfo());
+      fill_header_(ci->header, pImage);
+      m_camera_info_pub_->publish(std::move(ci));
+    }
 
     // Note: FPS / watchdog bookkeeping is handled in handle_camera_image_() (the
     // callback on the grab thread) so that timestamps are accurate even when the

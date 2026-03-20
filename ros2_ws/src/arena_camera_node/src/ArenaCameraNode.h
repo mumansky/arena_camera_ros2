@@ -31,9 +31,11 @@
 #include <rclcpp/timer.hpp>           // WallTimer
 #include <sensor_msgs/msg/image.hpp>  //image msg published
 #include <sensor_msgs/msg/compressed_image.hpp>  // compressed image
+#include <sensor_msgs/msg/camera_info.hpp>  // camera calibration
 #include <std_msgs/msg/header.hpp>    // for fill_header_ helper
 #include <std_srvs/srv/trigger.hpp>   // Trigger
 #include <diagnostic_updater/diagnostic_updater.hpp>  // diagnostics
+#include <camera_info_manager/camera_info_manager.hpp>  // calibration file loader
 
 // arena sdk
 #include "ArenaApi.h"
@@ -194,6 +196,8 @@ class ArenaCameraNode : public rclcpp::Node
 
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_compressed_;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr m_camera_info_pub_;
+  std::shared_ptr<camera_info_manager::CameraInfoManager> m_camera_info_manager_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_pol_0deg_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_pol_0deg_compressed_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_pol_45deg_;
@@ -261,6 +265,7 @@ class ArenaCameraNode : public rclcpp::Node
 
   std::string frame_id_;              // TF coordinate frame name for all published images
   bool use_camera_timestamp_;         // true = camera hardware clock; false = ROS clock (default)
+  std::string camera_info_url_;       // file:// URL to calibration YAML (empty = uncalibrated)
 
   size_t width_;
   bool is_passed_width;
