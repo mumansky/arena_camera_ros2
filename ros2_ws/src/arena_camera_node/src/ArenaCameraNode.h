@@ -239,6 +239,7 @@ class ArenaCameraNode : public rclcpp::Node
   
   // Streaming state for proper cleanup (atomic for thread safety between destructor and deleters)
   std::atomic<bool> m_is_streaming_;
+  bool m_clock_offset_logged_{false};  // per-instance: log PTP offset only on first frame
 
   // FPS / watchdog stats and processing-time aggregates — written by grab/worker threads,
   // read by ROS timer thread (produce_diagnostics_). Guarded by m_stats_mutex_.
@@ -389,8 +390,8 @@ class ArenaCameraNode : public rclcpp::Node
                        sensor_msgs::msg::Image& image_msg);
 
   // Fill a ROS message header with timestamp and frame_id.
-  // Uses ROS clock (this->now()) unless use_camera_timestamp_ is true, in which
-  // case the camera's hardware/PTP timestamp (pImage->GetTimestampNs()) is used.
+  // Uses this->now() (ROS clock) by default. When m_ptp_synced_ is true (camera
+  // is a PTP slave), uses the camera hardware timestamp from pImage->GetTimestampNs().
   void fill_header_(std_msgs::msg::Header& header, Arena::IImage* pImage);
 
   // Diagnostics

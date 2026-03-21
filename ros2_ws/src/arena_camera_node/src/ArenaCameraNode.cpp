@@ -162,8 +162,7 @@ void ArenaCameraNode::parse_parameters_()
     currentParam = "frame_id";
     frame_id_ = config_string(m_config_params_, "frame_id", "camera_optical_frame");
 
-    currentParam = "use_camera_timestamp";
-    // use_camera_timestamp_ removed — timestamping is now automatic:
+    // use_camera_timestamp_ removed — timestamping is automatic:
     // PTP synced (PtpStatus=Slave) → camera hardware clock; otherwise → ROS clock.
 
     currentParam = "camera_info_url";
@@ -359,25 +358,26 @@ void ArenaCameraNode::initialize_()
   if (is_passed_pub_qos_history_) {
     if (is_supported_qos_history_policy(pub_qos_history_)) {
       pub_qos_.history(
-          K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY[pub_qos_history_]);
+          K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY.at(pub_qos_history_));
     } else {
       throw std::invalid_argument("Unsupported QoS history policy: " + pub_qos_history_);
     }
   }
-  // QoS depth
-  if (is_passed_pub_qos_history_depth_ &&
-      K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY[pub_qos_history_] ==
-          RMW_QOS_POLICY_HISTORY_KEEP_LAST) {
-    // TODO
-    // test err msg withwhen -1
-    pub_qos_.keep_last(pub_qos_history_depth_);
+  // QoS depth — only apply if history policy is KEEP_LAST; use find() to avoid
+  // inserting into the map when pub_qos_history_ is unset (empty string).
+  if (is_passed_pub_qos_history_depth_) {
+    auto hist_it = K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY.find(pub_qos_history_);
+    if (hist_it != K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY.end() &&
+        hist_it->second == RMW_QOS_POLICY_HISTORY_KEEP_LAST) {
+      pub_qos_.keep_last(pub_qos_history_depth_);
+    }
   }
 
   // Qos reliability
   if (is_passed_pub_qos_reliability_) {
     if (is_supported_qos_reliability_policy(pub_qos_reliability_)) {
       pub_qos_.reliability(
-          K_CMDLN_PARAMETER_TO_QOS_RELIABILITY_POLICY[pub_qos_reliability_]);
+          K_CMDLN_PARAMETER_TO_QOS_RELIABILITY_POLICY.at(pub_qos_reliability_));
     } else {
       throw std::invalid_argument("Unsupported QoS reliability policy: " + pub_qos_reliability_);
     }
@@ -850,10 +850,9 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
     }
 
     // On first frame: read PTP sync status and measure the clock offset between
-    // the camera's hardware clock and the ROS system clock.
-    // The driver still uses this->now() for timestamps — this is diagnostic only.
-    static bool clock_offset_logged = false;
-    if (!clock_offset_logged) {
+    // the camera's hardware clock and the ROS system clock. Sets m_ptp_synced_
+    // so fill_header_() can choose the right timestamp source for all subsequent frames.
+    if (!m_clock_offset_logged_) {
       // Read PTP status from camera
       std::string ptp_status = "unknown";
       int64_t ptp_offset_ns = 0;
@@ -874,17 +873,16 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
       int64_t  offset_ms = (ros_ns - static_cast<int64_t>(cam_ns)) / 1000000;
 
       if (ptp_synced) {
-        RCLCPP_INFO(this->get_logger(),
-            "PTP synchronized (Slave) — using camera hardware timestamps. "
-            "Camera-ROS offset: %" PRId64 " ms, PtpOffsetFromMaster: %" PRId64 " ns",
-            offset_ms, ptp_offset_ns);
+        log_info("PTP synchronized (Slave) — using camera hardware timestamps. "
+                 "Camera-ROS offset: " + std::to_string(offset_ms) +
+                 " ms, PtpOffsetFromMaster: " + std::to_string(ptp_offset_ns) + " ns");
       } else {
-        RCLCPP_WARN(this->get_logger(),
-            "PTP NOT synchronized (PtpStatus: %s) — falling back to ROS system clock. "
-            "Camera-ROS offset: %" PRId64 " ms. Run ptp4l on the host for accurate timestamps.",
-            ptp_status.c_str(), offset_ms);
+        log_warn("PTP NOT synchronized (PtpStatus: " + ptp_status +
+                 ") — falling back to ROS system clock. Camera-ROS offset: " +
+                 std::to_string(offset_ms) +
+                 " ms. Run ptp4l on the host for accurate timestamps.");
       }
-      clock_offset_logged = true;
+      m_clock_offset_logged_ = true;
     }
 
     // --- Publish raw image if enabled ---

@@ -258,7 +258,8 @@ void ArenaCameraNode::set_nodes_pixelformat_()
   // PIXEL FORMAT HANDLEING
 
   if (is_passed_pixelformat_ros_) {
-    pixelformat_pfnc_ = K_ROS2_PIXELFORMAT_TO_PFNC[pixelformat_ros_];
+    auto pf_it = K_ROS2_PIXELFORMAT_TO_PFNC.find(pixelformat_ros_);
+    pixelformat_pfnc_ = (pf_it != K_ROS2_PIXELFORMAT_TO_PFNC.end()) ? pf_it->second : "";
     if (pixelformat_pfnc_.empty()) {
       throw std::invalid_argument("pixelformat is not supported!");
     }
@@ -278,11 +279,12 @@ void ArenaCameraNode::set_nodes_pixelformat_()
   } else {
     pixelformat_pfnc_ =
         Arena::GetNodeValue<GenICam::gcstring>(nodemap, "PixelFormat");
-    pixelformat_ros_ = K_PFNC_TO_ROS2_PIXELFORMAT[pixelformat_pfnc_];
+    auto ros_it = K_PFNC_TO_ROS2_PIXELFORMAT.find(pixelformat_pfnc_);
+    pixelformat_ros_ = (ros_it != K_PFNC_TO_ROS2_PIXELFORMAT.end()) ? ros_it->second : "";
 
     if (pixelformat_ros_.empty()) {
       log_warn(
-          "the device current pixelfromat value is not supported by ROS2. "
+          "the device current pixelformat value is not supported by ROS2. "
           "please use --ros-args -p pixelformat:=\"<supported pixelformat>\".");
       // TODO
       // print list of supported pixelformats
