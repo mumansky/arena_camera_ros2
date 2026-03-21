@@ -43,31 +43,26 @@ Four GTest suites: `test_pixelformat_translation`, `test_qos_translation`, `test
 ## Key Files
 | Path | Purpose |
 |------|---------|
-| `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` | Main node (2000+ lines) |
+| `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.cpp` | Main node (~1600 lines after refactor) |
 | `ros2_ws/src/arena_camera_node/src/ArenaCameraNode.h` | Node class declaration |
+| `ros2_ws/src/arena_camera_node/src/camera_config.cpp` | All `set_nodes_*` GenICam configuration methods |
+| `ros2_ws/src/arena_camera_node/src/diagnostics.cpp` | `produce_diagnostics_()` ROS diagnostics reporting |
+| `ros2_ws/src/arena_camera_node/src/config_helpers.h` | Inline YAML config reader helpers |
+| `ros2_ws/src/arena_camera_node/src/pixel_format_helpers.h` | PFNC constants and format detection/naming |
 | `ros2_ws/src/arena_camera_node/src/rclcpp_adapter/` | Pixel-format & QoS translation maps |
 | `ros2_ws/src/arena_camera_node/src/light_arena/` | Device info helpers |
 | `etc/arena_camera/camera.yaml` | All runtime parameters (single source of truth) |
 | `ros2_ws/src/arena_camera_node/CMakeLists.txt` | Build config — do not move `cmake/` helper |
 
 ## Known Bugs (confirmed, not yet fixed)
-Fix these before relying on the driver in production:
+Most bugs from the original code review were fixed in commit `d578af3`. Remaining known issues:
 
-| Line(s) | Bug | Fix |
-|---------|-----|-----|
-| ~525, ~544 | Bare `throw;` outside catch → UB/terminate | `throw std::invalid_argument(...)` |
-| ~1712 | Missing `return` in trigger handler → falls through to fire trigger unconditionally | Add `return;` |
-| trigger loop | `waitForTriggerCount` never decrements → infinite busy-wait, pins CPU | Add sleep + max retries |
-| grab/worker threads | Data race on `m_fps_frame_count_`, `m_last_frame_time_`, `m_images_published_` (plain types, not atomic) | Make atomic or consolidate ownership |
-| process path | No `pImage->IsIncomplete()` check → corrupted GigE frames published silently | Add check + warning + diagnostic counter |
-| all timestamps | Camera hardware clock used by default → breaks IMU/sensor fusion unless PTP configured | Default to `this->now()` (config: `use_camera_timestamp: false`) |
-| ~1858 | `auto index = 0` should be `size_t` | Fix type |
-| trigger handler | `std::exception` caught before `GenICam::GenericException` → GenICam catch is dead code | Swap catch order |
-| startup | `AcquisitionMode` never set → relies on camera's UserSetDefault | Set `"Continuous"` explicitly before `StartStream()` |
-| `m_processing_image_` | Atomic bool initialized false, never set true → backpressure flag is dead | Either use it or remove it |
+| Area | Bug | Fix |
+|------|-----|-----|
+| PTP timestamps | `use_camera_timestamp` in `camera.yaml` defaults to `false` but PTP refactor (`ccc38b6`) now uses `m_ptp_synced_` for timestamp selection — the yaml param may no longer take effect | Audit `fill_header_()` vs yaml param wiring |
 
 ## Important Patterns
-- **Sensor fusion timestamps**: Always use `this->now()` unless PTP is configured. The `use_camera_timestamp: false` default in `camera.yaml` is intentional.
+- **Sensor fusion timestamps**: `fill_header_()` uses `this->now()` by default; switches to camera hardware timestamp when `m_ptp_synced_` is true (camera is a PTP slave). The `use_camera_timestamp: false` default in `camera.yaml` is intentional for IMU fusion.
 - **frame_id**: Must be a TF frame name (e.g., `"camera_optical_frame"`), not the integer frame counter.
 - **Polarization channels**: 4 channels at 0°, 45°, 90°, 135°. DOLP and AoLP derived from Stokes parameters.
 - **Pixel format code**: `0x8220020F` = polarized format, `0x02180015` = BayerRG8.
