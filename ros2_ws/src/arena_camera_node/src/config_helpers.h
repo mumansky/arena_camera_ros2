@@ -66,3 +66,8 @@ inline bool config_has(const YAML::Node& config, const std::string& key)
 {
   return config && config[key];
 }
+
+inline bool config_has_value(const YAML::Node& config, const std::string& key)
+{
+  return config && config[key] && !config[key].IsNull();
+}

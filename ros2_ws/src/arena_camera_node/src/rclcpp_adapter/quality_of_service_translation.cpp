@@ -1,5 +1,3 @@
-#pragma once
-
 #include "quality_of_service_translation.h"
 
 std::map<std::string, rmw_qos_reliability_policy_t>

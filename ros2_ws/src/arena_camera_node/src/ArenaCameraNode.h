@@ -201,8 +201,6 @@ class ArenaCameraNode : public rclcpp::Node
 
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_compressed_;
-  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr m_camera_info_pub_;
-  std::shared_ptr<camera_info_manager::CameraInfoManager> m_camera_info_manager_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_pol_0deg_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_pol_0deg_compressed_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_pol_45deg_;
@@ -354,7 +352,6 @@ class ArenaCameraNode : public rclcpp::Node
   bool publish_aolp_;
   bool publish_stokes_;           // Publish S0/S1/S2 Stokes parameter images
   bool publish_aolp_color_;       // Publish false-color HSV AoLP visualization
-  std::string camera_info_url_;  // URL to camera calibration file (empty = uncalibrated stub)
   // Latency profiling
   std::string latency_mode_;      // "off" | "callback" | "hardware" | "both"
   bool profile_latency_{false};             // true when any latency mode is active
