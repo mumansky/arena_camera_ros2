@@ -40,6 +40,7 @@
  * Trigger mode uses blocking GetImage() in publish_an_image_on_trigger_().
  */
 
+#include <cinttypes>  // PRId64, PRIu64
 #include <cstring>    // memcpy
 #include <cmath>      // std::atan2, std::acos, std::clamp
 #include <algorithm>  // std::clamp
@@ -64,58 +65,11 @@
 // ArenaSDK
 #include "ArenaCameraNode.h"
 #include "arena_image_raii.h"
+#include "config_helpers.h"
+#include "pixel_format_helpers.h"
 #include "light_arena/deviceinfo_helper.h"
 #include "rclcpp_adapter/pixelformat_translation.h"
-#include "rclcpp_adapter/quilty_of_service_translation.cpp"
-
-// ============================================================================
-// Pixel Format Constants
-// ============================================================================
-// These constants define the PFNC (PixelFormat Naming Convention) values used
-// by Arena SDK for different image formats. Using named constants instead of
-// magic numbers improves code readability and maintainability.
-// Note: PFNC_BGR8 is already defined as a macro in Arena SDK's PFNC.h
-
-namespace PixelFormat {
-  // PolarizedAngles_0d_45d_90d_135d_BayerRG8 format
-  // Used by polarized cameras (e.g., PHX050S1-QC) that capture 4 polarization
-  // angles (0°, 45°, 90°, 135°) in a single Bayer pattern image.
-  // Each 2x2 Bayer quad contains one pixel for each polarization angle.
-  constexpr uint64_t PFNC_POLARIZED_BAYER_RG8 = 0x8220020F;
-  // Mono8 (GenICam PFNC standard value 0x01080001): single-channel 8-bit grayscale.
-  // Named MONO8 to avoid macro name collision with ArenaSDK's PFNC_Mono8 macro.
-  constexpr uint64_t MONO8 = 0x01080001;
-}
-
-// ============================================================================
-// Helper Functions for Pixel Format Detection
-// ============================================================================
-
-/**
- * @brief Check if the given pixel format is a polarized format
- * @param format PFNC pixel format value from Arena SDK
- * @return true if the format is a polarized format, false otherwise
- */
-inline bool is_polarized_format(uint64_t format) {
-  return format == PixelFormat::PFNC_POLARIZED_BAYER_RG8;
-}
-
-/**
- * @brief Get a human-readable name for a pixel format
- * @param format PFNC pixel format value from Arena SDK
- * @return String describing the pixel format
- */
-inline std::string get_pixel_format_name(uint64_t format) {
-  if (format == PixelFormat::PFNC_POLARIZED_BAYER_RG8) {
-    return "PolarizedAngles_0d_45d_90d_135d_BayerRG8";
-  } else if (format == PFNC_BGR8) {
-    return "BGR8";
-  } else {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(format));
-    return std::string("Unknown (") + buf + ")";
-  }
-}
+#include "rclcpp_adapter/quality_of_service_translation.h"
 
 /**
  * @brief Validate that an image has the expected BGR8 pixel format after conversion.
@@ -133,12 +87,12 @@ inline std::string get_pixel_format_name(uint64_t format) {
 inline bool validate_bgr8_format(Arena::IImage* image, const std::string& context) {
   if (!image) return false;
   uint64_t actual = image->GetPixelFormat();
-  if (actual != PFNC_BGR8) {
+  if (actual != PixelFormat::BGR8) {
     // Log as error since downstream code assumes BGR8 layout
     RCLCPP_ERROR(rclcpp::get_logger("arena_camera_node"),
         "Unexpected pixel format after conversion in %s: expected BGR8 (0x%lx), got 0x%lx. "
         "Image data may be corrupted.",
-        context.c_str(), static_cast<unsigned long>(PFNC_BGR8), static_cast<unsigned long>(actual));
+        context.c_str(), static_cast<unsigned long>(PixelFormat::BGR8), static_cast<unsigned long>(actual));
     return false;
   }
   return true;
@@ -194,112 +148,6 @@ void ArenaCameraNode::load_config_file_()
   }
 }
 
-/**
- * @brief Helper to safely read a string value from YAML config
- * @param config YAML node to read from
- * @param key Parameter key name
- * @param default_val Default value if key not found or conversion fails
- * @return The parameter value or default
- */
-static std::string config_string(const YAML::Node& config, const std::string& key, const std::string& default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<std::string>();
-    }
-  } catch (const YAML::Exception&) {
-    // Type conversion failed; fall through to default
-  }
-  return default_val;
-}
-
-/**
- * @brief Helper to safely read a bool value from YAML config
- * @param config YAML node to read from
- * @param key Parameter key name
- * @param default_val Default value if key not found or conversion fails
- * @return The parameter value or default
- */
-static bool config_bool(const YAML::Node& config, const std::string& key, bool default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<bool>();
-    }
-  } catch (const YAML::Exception&) {
-    // Type conversion failed; fall through to default
-  }
-  return default_val;
-}
-
-/**
- * @brief Helper to safely read a double value from YAML config
- * @param config YAML node to read from
- * @param key Parameter key name
- * @param default_val Default value if key not found or conversion fails
- * @return The parameter value or default
- */
-static double config_double(const YAML::Node& config, const std::string& key, double default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<double>();
-    }
-  } catch (const YAML::Exception&) {
-    // Type conversion failed; fall through to default
-  }
-  return default_val;
-}
-
-/**
- * @brief Helper to safely read an int64 value from YAML config
- * @param config YAML node to read from
- * @param key Parameter key name
- * @param default_val Default value if key not found or conversion fails
- * @return The parameter value or default
- */
-static int64_t config_int64(const YAML::Node& config, const std::string& key, int64_t default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<int64_t>();
-    }
-  } catch (const YAML::Exception&) {
-    // Type conversion failed; fall through to default
-  }
-  return default_val;
-}
-
-/**
- * @brief Helper to safely read an int value from YAML config
- * @param config YAML node to read from
- * @param key Parameter key name
- * @param default_val Default value if key not found or conversion fails
- * @return The parameter value or default
- */
-static int config_int(const YAML::Node& config, const std::string& key, int default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<int>();
-    }
-  } catch (const YAML::Exception&) {
-    // Type conversion failed; fall through to default
-  }
-  return default_val;
-}
-
-/**
- * @brief Helper to check if a key exists in YAML config
- * @param config YAML node to check
- * @param key Parameter key name
- * @return true if key exists, false otherwise
- */
-static bool config_has(const YAML::Node& config, const std::string& key)
-{
-  return config && config[key];
-}
-
 void ArenaCameraNode::parse_parameters_()
 {
   std::string currentParam = "";
@@ -314,8 +162,8 @@ void ArenaCameraNode::parse_parameters_()
     currentParam = "frame_id";
     frame_id_ = config_string(m_config_params_, "frame_id", "camera_optical_frame");
 
-    currentParam = "use_camera_timestamp";
-    use_camera_timestamp_ = config_bool(m_config_params_, "use_camera_timestamp", false);
+    // use_camera_timestamp_ removed — timestamping is automatic:
+    // PTP synced (PtpStatus=Slave) → camera hardware clock; otherwise → ROS clock.
 
     currentParam = "camera_info_url";
     camera_info_url_ = config_string(m_config_params_, "camera_info_url", "");
@@ -508,27 +356,28 @@ void ArenaCameraNode::initialize_()
   rclcpp::SensorDataQoS pub_qos_;
   // QoS history
   if (is_passed_pub_qos_history_) {
-    if (is_supported_qos_histroy_policy(pub_qos_history_)) {
+    if (is_supported_qos_history_policy(pub_qos_history_)) {
       pub_qos_.history(
-          K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY[pub_qos_history_]);
+          K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY.at(pub_qos_history_));
     } else {
       throw std::invalid_argument("Unsupported QoS history policy: " + pub_qos_history_);
     }
   }
-  // QoS depth
-  if (is_passed_pub_qos_history_depth_ &&
-      K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY[pub_qos_history_] ==
-          RMW_QOS_POLICY_HISTORY_KEEP_LAST) {
-    // TODO
-    // test err msg withwhen -1
-    pub_qos_.keep_last(pub_qos_history_depth_);
+  // QoS depth — only apply if history policy is KEEP_LAST; use find() to avoid
+  // inserting into the map when pub_qos_history_ is unset (empty string).
+  if (is_passed_pub_qos_history_depth_) {
+    auto hist_it = K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY.find(pub_qos_history_);
+    if (hist_it != K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY.end() &&
+        hist_it->second == RMW_QOS_POLICY_HISTORY_KEEP_LAST) {
+      pub_qos_.keep_last(pub_qos_history_depth_);
+    }
   }
 
   // Qos reliability
   if (is_passed_pub_qos_reliability_) {
     if (is_supported_qos_reliability_policy(pub_qos_reliability_)) {
       pub_qos_.reliability(
-          K_CMDLN_PARAMETER_TO_QOS_RELIABILITY_POLICY[pub_qos_reliability_]);
+          K_CMDLN_PARAMETER_TO_QOS_RELIABILITY_POLICY.at(pub_qos_reliability_));
     } else {
       throw std::invalid_argument("Unsupported QoS reliability policy: " + pub_qos_reliability_);
     }
@@ -1000,6 +849,42 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
       format_logged = true;
     }
 
+    // On first frame: read PTP sync status and measure the clock offset between
+    // the camera's hardware clock and the ROS system clock. Sets m_ptp_synced_
+    // so fill_header_() can choose the right timestamp source for all subsequent frames.
+    if (!m_clock_offset_logged_) {
+      // Read PTP status from camera
+      std::string ptp_status = "unknown";
+      int64_t ptp_offset_ns = 0;
+      try {
+        auto nodemap = m_pDevice->GetNodeMap();
+        GenICam::gcstring s = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "PtpStatus");
+        ptp_status = std::string(s.c_str());
+        try {
+          ptp_offset_ns = Arena::GetNodeValue<int64_t>(nodemap, "PtpOffsetFromMaster");
+        } catch (...) {}
+      } catch (...) {}
+
+      bool ptp_synced = (ptp_status == "Slave");
+      m_ptp_synced_.store(ptp_synced);
+
+      uint64_t cam_ns    = pImage->GetTimestampNs();
+      int64_t  ros_ns    = this->now().nanoseconds();
+      int64_t  offset_ms = (ros_ns - static_cast<int64_t>(cam_ns)) / 1000000;
+
+      if (ptp_synced) {
+        log_info("PTP synchronized (Slave) — using camera hardware timestamps. "
+                 "Camera-ROS offset: " + std::to_string(offset_ms) +
+                 " ms, PtpOffsetFromMaster: " + std::to_string(ptp_offset_ns) + " ns");
+      } else {
+        log_warn("PTP NOT synchronized (PtpStatus: " + ptp_status +
+                 ") — falling back to ROS system clock. Camera-ROS offset: " +
+                 std::to_string(offset_ms) +
+                 " ms. Run ptp4l on the host for accurate timestamps.");
+      }
+      m_clock_offset_logged_ = true;
+    }
+
     // --- Publish raw image if enabled ---
     if (publish_raw_ && m_pub_) {
       auto p_image_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -1252,6 +1137,24 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                   cv::Mat tdolp = to_display_tile(maybe_undistort(display_dolp), "DOLP" + undist_suffix);
                   cv::Mat taolp = to_display_tile(maybe_undistort(display_aolp), "AoLP" + undist_suffix);
                   cv::Mat tblank = cv::Mat::zeros(scaled_h, scaled_w, CV_8UC3);
+                  // Snapshot thread-shared data before the overlay block
+                  double overlay_fps;
+                  {
+                    std::lock_guard<std::mutex> slock(m_stats_mutex_);
+                    overlay_fps = m_calculated_fps_;
+                  }
+                  std::string overlay_exposure, overlay_target_bright, overlay_calc_mean;
+                  {
+                    std::lock_guard<std::mutex> clock(m_diag_cache_mutex_);
+                    auto get = [&](const char* k) -> std::string {
+                      auto it = m_diag_genicam_cache_.find(k);
+                      return it != m_diag_genicam_cache_.end() ? it->second : "N/A";
+                    };
+                    overlay_exposure      = get("ExposureTime (us)");
+                    overlay_target_bright = get("TargetBrightness");
+                    overlay_calc_mean     = get("CalculatedMean");
+                  }
+
                   // Overlay diagnostics info on the info tile
                   {
                     int y = 25;
@@ -1261,23 +1164,17 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                                   cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1);
                       y += line_h;
                     };
-                    
+
                     put_line("--- Diagnostics ---", cv::Scalar(0, 255, 0));
-                    
+
                     // FPS (from live counter, not cache)
                     std::ostringstream fps_ss;
-                    fps_ss << std::fixed << std::setprecision(1) << m_calculated_fps_;
+                    fps_ss << std::fixed << std::setprecision(1) << overlay_fps;
                     put_line("FPS: " + fps_ss.str());
-                    
-                    // Look up values from diagnostics cache (O(1) map lookup)
-                    auto cache_value = [&](const std::string& key) -> std::string {
-                      auto it = m_diag_genicam_cache_.find(key);
-                      return (it != m_diag_genicam_cache_.end()) ? it->second : "N/A";
-                    };
-                    
-                    put_line("ExposureTime: " + cache_value("ExposureTime (us)") + " us");
-                    put_line("TargetBright: " + cache_value("TargetBrightness"));
-                    put_line("CalcMean: " + cache_value("CalculatedMean"));
+
+                    put_line("ExposureTime: " + overlay_exposure + " us");
+                    put_line("TargetBright: " + overlay_target_bright);
+                    put_line("CalcMean: " + overlay_calc_mean);
                     
                     y += 10;  // spacer
                     std::string undist_status = m_undistort_maps_ready_
@@ -1373,15 +1270,19 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
       log_warn("Unknown exception extracting polarization channels");
     }
 
-    // Processing time metrics
-    auto processing_end = std::chrono::steady_clock::now();
-    m_last_processing_time_ms_ = std::chrono::duration<double, std::milli>(
-        processing_end - processing_start).count();
-    if (m_last_processing_time_ms_ > m_max_processing_time_ms_) {
-      m_max_processing_time_ms_ = m_last_processing_time_ms_;
+    // Processing time metrics — guard with m_stats_mutex_ (read by diagnostics timer thread)
+    {
+      auto processing_end = std::chrono::steady_clock::now();
+      double elapsed_ms = std::chrono::duration<double, std::milli>(
+          processing_end - processing_start).count();
+      std::lock_guard<std::mutex> slock(m_stats_mutex_);
+      m_last_processing_time_ms_ = elapsed_ms;
+      if (elapsed_ms > m_max_processing_time_ms_) {
+        m_max_processing_time_ms_ = elapsed_ms;
+      }
+      m_total_processing_time_ms_ += elapsed_ms;
+      m_processing_time_samples_++;
     }
-    m_total_processing_time_ms_ += m_last_processing_time_ms_;
-    m_processing_time_samples_++;
 
   } catch (GenICam::GenericException& e) {
     m_image_publish_errors_++;
@@ -1473,13 +1374,16 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
 
 void ArenaCameraNode::fill_header_(std_msgs::msg::Header& header, Arena::IImage* pImage)
 {
-  if (use_camera_timestamp_) {
-    // Use camera hardware/PTP clock. Only valid when PTP is synchronized.
+  if (m_ptp_synced_.load()) {
+    // PTP synchronized: camera clock tracks wall time — use hardware timestamp
+    // for accurate exposure-time alignment with IMU/LiDAR.
     uint64_t ts_ns = pImage->GetTimestampNs();
-    header.stamp.sec    = static_cast<int32_t>(ts_ns / 1000000000ULL);
+    header.stamp.sec     = static_cast<int32_t>(ts_ns / 1000000000ULL);
     header.stamp.nanosec = static_cast<uint32_t>(ts_ns % 1000000000ULL);
   } else {
-    // Default: ROS system clock — required for sensor fusion with IMU/LiDAR.
+    // No PTP: fall back to ROS system clock at processing time.
+    // This has ~2-15 ms jitter vs true exposure time but is at least
+    // in the correct time domain for downstream consumers.
     header.stamp = this->now();
   }
   header.frame_id = frame_id_;
@@ -1726,762 +1630,4 @@ Arena::IDevice* ArenaCameraNode::create_device_ros_()
   return pDevice;
 }
 
-void ArenaCameraNode::set_nodes_()
-{
-  // Load default profile. On reconnect after a crash the camera may still be
-  // in a streaming state, which makes UserSet nodes read-only (AccessException).
-  // Treat this as non-fatal — remaining set_nodes_* calls will still apply config.
-  try {
-    set_nodes_load_default_profile_();
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tCould not load default profile (camera may be in a bad state): ") + e.what());
-  } catch (std::exception& e) {
-    log_warn(std::string("\tCould not load default profile: ") + e.what());
-  }
-
-  // Explicitly set AcquisitionMode to "Continuous" regardless of the saved UserSet.
-  // SDK examples always set this — if someone previously saved the camera in
-  // SingleFrame mode, streaming will silently produce no frames without this.
-  try {
-    auto nodemap = m_pDevice->GetNodeMap();
-    Arena::SetNodeValue<GenICam::gcstring>(nodemap, "AcquisitionMode", "Continuous");
-    log_info("\tAcquisitionMode set to Continuous");
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tCould not set AcquisitionMode: ") + e.what());
-  } catch (std::exception& e) {
-    log_warn(std::string("\tCould not set AcquisitionMode: ") + e.what());
-  }
-
-  set_nodes_roi_();
-  set_nodes_gain_();
-  set_nodes_pixelformat_();
-  log_debug("set_nodes_pixelformat_() completed");
-  set_nodes_frame_rate_();
-  log_debug("set_nodes_frame_rate_() completed");
-  set_nodes_exposure_();
-  log_debug("set_nodes_exposure_() completed");
-  set_nodes_trigger_mode_();
-  log_debug("set_nodes_trigger_mode_() completed");
-  // configure Auto Negotiate Packet Size and Packet Resend
-  try {
-    auto pTLStreamNodeMap = m_pDevice->GetTLStreamNodeMap();
-
-    // "NewestOnly" drops old frames when the consumer can't keep up, preventing
-    // buffer exhaustion that deadlocks the grab thread.  Every Arena SDK example
-    // sets this — the default "OldestFirst" will eventually stall the stream.
-    Arena::SetNodeValue<GenICam::gcstring>(pTLStreamNodeMap, "StreamBufferHandlingMode", "NewestOnly");
-    log_debug("StreamBufferHandlingMode set to NewestOnly");
-
-    Arena::SetNodeValue<bool>(pTLStreamNodeMap, "StreamAutoNegotiatePacketSize", true);
-    Arena::SetNodeValue<bool>(pTLStreamNodeMap, "StreamPacketResendEnable", true);
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tStream configuration warning: ") + e.what());
-  } catch (std::exception& e) {
-    log_warn(std::string("\tStream configuration warning: ") + e.what());
-  }
-
-  // Reserve 10% of link bandwidth for packet resend retransmissions.
-  // SDK performance docs recommend this when StreamPacketResendEnable is true.
-  try {
-    auto nodemap = m_pDevice->GetNodeMap();
-    Arena::SetNodeValue<int64_t>(nodemap, "DeviceLinkThroughputReserve", 10);
-    log_debug("\tDeviceLinkThroughputReserve set to 10%");
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tDeviceLinkThroughputReserve warning: ") + e.what());
-  } catch (std::exception& e) {
-    log_warn(std::string("\tDeviceLinkThroughputReserve warning: ") + e.what());
-  }
-
-  // Maximize GigE packet size for best throughput (follows RapidAcquisition example)
-  try {
-    auto nodemap = m_pDevice->GetNodeMap();
-    GenApi::CIntegerPtr pPacketSize = nodemap->GetNode("DeviceStreamChannelPacketSize");
-    if (pPacketSize && GenApi::IsReadable(pPacketSize) && GenApi::IsWritable(pPacketSize)) {
-      int64_t maxPacketSize = pPacketSize->GetMax();
-      pPacketSize->SetValue(maxPacketSize);
-      log_info(std::string("\tDeviceStreamChannelPacketSize set to ") +
-               std::to_string(maxPacketSize) + " bytes");
-    }
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tPacket size configuration warning: ") + e.what());
-  } catch (std::exception& e) {
-    log_warn(std::string("\tPacket size configuration warning: ") + e.what());
-  }
-  log_debug("Stream configuration completed");
-
-  //set_nodes_test_pattern_image_();
-}
-
-void ArenaCameraNode::set_nodes_load_default_profile_()
-{
-  auto nodemap = m_pDevice->GetNodeMap();
-  // device run on default profile all the time if no args are passed
-  // otherwise, overwise only these params
-  Arena::SetNodeValue<GenICam::gcstring>(nodemap, "UserSetSelector", "Default");
-  // execute the profile
-  Arena::ExecuteNode(nodemap, "UserSetLoad");
-  log_info("\tdefault profile is loaded");
-}
-
-void ArenaCameraNode::set_nodes_roi_()
-{
-  auto nodemap = m_pDevice->GetNodeMap();
-
-  // Width -------------------------------------------------
-  if (is_passed_width) {
-    // Align to camera increment (many cameras require multiples of 4, 8, or 16)
-    GenApi::CIntegerPtr pWidth = nodemap->GetNode("Width");
-    if (pWidth && GenApi::IsReadable(pWidth) && GenApi::IsWritable(pWidth)) {
-      int64_t min_val = pWidth->GetMin();
-      int64_t inc     = pWidth->GetInc();
-      int64_t max_val = pWidth->GetMax();
-      int64_t requested = static_cast<int64_t>(width_);
-      int64_t aligned = ((requested - min_val) / inc * inc) + min_val;
-      aligned = std::clamp(aligned, min_val, max_val);
-      if (aligned != requested) {
-        log_warn("\tWidth " + std::to_string(requested) + " adjusted to " +
-                 std::to_string(aligned) + " (increment=" + std::to_string(inc) + ")");
-        width_ = static_cast<size_t>(aligned);
-      }
-      pWidth->SetValue(aligned);
-    } else {
-      Arena::SetNodeValue<int64_t>(nodemap, "Width", static_cast<int64_t>(width_));
-    }
-  } else {
-    width_ = Arena::GetNodeValue<int64_t>(nodemap, "Width");
-  }
-
-  // Height ------------------------------------------------
-  if (is_passed_height) {
-    // Align to camera increment
-    GenApi::CIntegerPtr pHeight = nodemap->GetNode("Height");
-    if (pHeight && GenApi::IsReadable(pHeight) && GenApi::IsWritable(pHeight)) {
-      int64_t min_val = pHeight->GetMin();
-      int64_t inc     = pHeight->GetInc();
-      int64_t max_val = pHeight->GetMax();
-      int64_t requested = static_cast<int64_t>(height_);
-      int64_t aligned = ((requested - min_val) / inc * inc) + min_val;
-      aligned = std::clamp(aligned, min_val, max_val);
-      if (aligned != requested) {
-        log_warn("\tHeight " + std::to_string(requested) + " adjusted to " +
-                 std::to_string(aligned) + " (increment=" + std::to_string(inc) + ")");
-        height_ = static_cast<size_t>(aligned);
-      }
-      pHeight->SetValue(aligned);
-    } else {
-      Arena::SetNodeValue<int64_t>(nodemap, "Height", static_cast<int64_t>(height_));
-    }
-  } else {
-    height_ = Arena::GetNodeValue<int64_t>(nodemap, "Height");
-  }
-
-  log_info(std::string("\tROI set to ") + std::to_string(width_) + "X" +
-           std::to_string(height_));
-}
-
-void ArenaCameraNode::set_nodes_gain_()
-{
-  auto nodemap = m_pDevice->GetNodeMap();
-
-  if (is_passed_auto_gain_) {
-    try {
-      // Verify the node is writable and the value is valid
-      GenApi::CEnumerationPtr pGainAuto = nodemap->GetNode("GainAuto");
-      if (pGainAuto && GenApi::IsWritable(pGainAuto)) {
-        // Check if the requested value is available
-        if (pGainAuto->GetEntryByName(auto_gain_.c_str())) {
-          Arena::SetNodeValue<GenICam::gcstring>(nodemap, "GainAuto", auto_gain_.c_str());
-          log_info(std::string("\tGainAuto set to ") + auto_gain_);
-        } else {
-          log_warn(std::string("\tGainAuto value '") + auto_gain_ + "' not supported by this camera. Available values:");
-          GenApi::StringList_t entries;
-          pGainAuto->GetSymbolics(entries);
-          for (const auto& entry : entries) {
-            log_warn(std::string("\t  - ") + entry.c_str());
-          }
-          log_warn("\tSkipping GainAuto setting.");
-          return;
-        }
-      } else {
-        log_warn("\tGainAuto node not writable");
-        return;
-      }
-      
-      if (auto_gain_ != "Off") {
-        return;  // auto gain enabled; skip manual gain
-      }
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set GainAuto: ") + e.what());
-      return;
-    }
-  }
-
-  if (is_passed_gain_) {  // manual override
-    if (!is_passed_auto_gain_) {
-      try {
-        Arena::SetNodeValue<GenICam::gcstring>(nodemap, "GainAuto", "Off");
-        log_info("\tGainAuto set to Off");
-      } catch (GenICam::GenericException& e) {
-        log_warn(std::string("\tFailed to set GainAuto to Off: ") + e.what());
-      }
-    }
-    try {
-      Arena::SetNodeValue<double>(nodemap, "Gain", gain_);
-      log_info(std::string("\tGain set to ") + std::to_string(gain_));
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set Gain: ") + e.what());
-    }
-  }
-}
-
-void ArenaCameraNode::set_nodes_pixelformat_()
-{
-  auto nodemap = m_pDevice->GetNodeMap();
-  // TODO ---------------------------------------------------------------------
-  // PIXEL FORMAT HANDLEING
-
-  if (is_passed_pixelformat_ros_) {
-    pixelformat_pfnc_ = K_ROS2_PIXELFORMAT_TO_PFNC[pixelformat_ros_];
-    if (pixelformat_pfnc_.empty()) {
-      throw std::invalid_argument("pixelformat is not supported!");
-    }
-
-    try {
-      Arena::SetNodeValue<GenICam::gcstring>(nodemap, "PixelFormat",
-                                             pixelformat_pfnc_.c_str());
-      log_info(std::string("\tPixelFormat set to ") + pixelformat_pfnc_);
-
-    } catch (GenICam::GenericException& e) {
-      // TODO
-      // an rcl expectation might be expected
-      auto x = std::string("pixelformat is not supported by this camera");
-      x.append(e.what());
-      throw std::invalid_argument(x);
-    }
-  } else {
-    pixelformat_pfnc_ =
-        Arena::GetNodeValue<GenICam::gcstring>(nodemap, "PixelFormat");
-    pixelformat_ros_ = K_PFNC_TO_ROS2_PIXELFORMAT[pixelformat_pfnc_];
-
-    if (pixelformat_ros_.empty()) {
-      log_warn(
-          "the device current pixelfromat value is not supported by ROS2. "
-          "please use --ros-args -p pixelformat:=\"<supported pixelformat>\".");
-      // TODO
-      // print list of supported pixelformats
-    }
-  }
-}
-
-void ArenaCameraNode::set_nodes_exposure_()
-{
-  auto nodemap = m_pDevice->GetNodeMap();
-
-  // --- Step 1: Ensure ExposureMode is "Timed" ---
-  // Other modes (e.g. TriggerWidth) make ExposureAuto read-only because
-  // exposure duration is controlled externally by the trigger signal width.
-  try {
-    GenApi::CEnumerationPtr pExposureMode = nodemap->GetNode("ExposureMode");
-    if (pExposureMode && GenApi::IsWritable(pExposureMode)) {
-      GenICam::gcstring currentMode = pExposureMode->GetCurrentEntry()->GetSymbolic();
-      if (currentMode != "Timed") {
-        log_info(std::string("\tExposureMode is '") + currentMode.c_str() +
-                 "', switching to 'Timed' to allow auto exposure control");
-        Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureMode", "Timed");
-      }
-    } else if (pExposureMode) {
-      GenICam::gcstring currentMode = pExposureMode->GetCurrentEntry()->GetSymbolic();
-      log_debug(std::string("\tExposureMode is '") + currentMode.c_str() + "' (read-only)");
-    }
-  } catch (GenICam::GenericException& e) {
-    log_debug(std::string("\tExposureMode check: ") + e.what());
-  }
-
-  // --- Step 2: Enable ExposureAuto BEFORE fine-tuning params ---
-  // Many auto-exposure sub-nodes (limits, algorithm, damping) are only
-  // writable/meaningful when ExposureAuto is "Continuous".  Setting them
-  // while ExposureAuto is "Off" can cause the camera to auto-calculate
-  // collapsed limits (e.g. upper == lower == sensor minimum).
-  bool auto_exposure_set = false;
-  if (is_passed_auto_exposure_) {
-    try {
-      GenApi::CEnumerationPtr pExposureAuto = nodemap->GetNode("ExposureAuto");
-      if (pExposureAuto && GenApi::IsWritable(pExposureAuto)) {
-        if (pExposureAuto->GetEntryByName(auto_exposure_.c_str())) {
-          Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureAuto", auto_exposure_.c_str());
-          log_info(std::string("\tExposureAuto set to ") + auto_exposure_);
-          auto_exposure_set = true;
-        } else {
-          log_warn(std::string("\tExposureAuto value '") + auto_exposure_ + "' not supported by this camera. Available values:");
-          GenApi::StringList_t entries;
-          pExposureAuto->GetSymbolics(entries);
-          for (const auto& entry : entries) {
-            log_warn(std::string("\t  - ") + entry.c_str());
-          }
-          log_warn("\tSkipping ExposureAuto setting. Other exposure parameters will still be applied.");
-        }
-      } else {
-        // Detailed diagnostic: why is the node not writable?
-        std::string reason = "ExposureAuto node not writable.";
-        try {
-          GenICam::gcstring currentVal = pExposureAuto
-              ? pExposureAuto->GetCurrentEntry()->GetSymbolic()
-              : "null";
-          reason += " Current value: " + std::string(currentVal.c_str()) + ".";
-        } catch (...) {}
-        try {
-          GenICam::gcstring mode = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "ExposureMode");
-          reason += " ExposureMode: " + std::string(mode.c_str()) + ".";
-        } catch (...) {}
-        try {
-          GenICam::gcstring trig = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode");
-          reason += " TriggerMode: " + std::string(trig.c_str()) + ".";
-        } catch (...) {}
-        log_warn(std::string("\t") + reason + " Other exposure parameters will still be applied.");
-      }
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ExposureAuto: ") + e.what() + ". Other exposure parameters will still be applied.");
-    }
-  }
-
-  // --- Step 3: Fine-tune auto exposure parameters (now that ExposureAuto is set) ---
-  if (is_passed_exposure_auto_algorithm_) {
-    try {
-      GenApi::CEnumerationPtr pAlgorithm = nodemap->GetNode("ExposureAutoAlgorithm");
-      if (pAlgorithm && GenApi::IsWritable(pAlgorithm)) {
-        if (pAlgorithm->GetEntryByName(exposure_auto_algorithm_.c_str())) {
-          Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureAutoAlgorithm", exposure_auto_algorithm_.c_str());
-          log_info(std::string("\tExposureAutoAlgorithm set to ") + exposure_auto_algorithm_);
-        } else {
-          log_warn(std::string("\tExposureAutoAlgorithm value '") + exposure_auto_algorithm_ + "' not supported. Available values:");
-          GenApi::StringList_t entries;
-          pAlgorithm->GetSymbolics(entries);
-          for (const auto& entry : entries) {
-            log_warn(std::string("\t  - ") + entry.c_str());
-          }
-        }
-      } else {
-        log_warn("\tExposureAutoAlgorithm node not writable (requires ExposureAuto = Continuous)");
-      }
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ExposureAutoAlgorithm: ") + e.what());
-    }
-  }
-
-  if (is_passed_target_brightness_) {
-    try {
-      Arena::SetNodeValue<int64_t>(nodemap, "TargetBrightness", target_brightness_);
-      log_info(std::string("\tTargetBrightness set to ") + std::to_string(target_brightness_));
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set TargetBrightness: ") + e.what());
-    }
-  }
-
-  if (is_passed_exposure_auto_damping_) {
-    try {
-      Arena::SetNodeValue<double>(nodemap, "ExposureAutoDamping", exposure_auto_damping_);
-      log_info(std::string("\tExposureAutoDamping set to ") + std::to_string(exposure_auto_damping_));
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ExposureAutoDamping: ") + e.what());
-    }
-  }
-
-  // Set exposure limit control (set mode before explicit limits)
-  if (is_passed_exposure_auto_limit_auto_) {
-    try {
-      GenApi::CEnumerationPtr pLimitAuto = nodemap->GetNode("ExposureAutoLimitAuto");
-      if (pLimitAuto && GenApi::IsWritable(pLimitAuto)) {
-        if (pLimitAuto->GetEntryByName(exposure_auto_limit_auto_.c_str())) {
-          Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureAutoLimitAuto", exposure_auto_limit_auto_.c_str());
-          log_info(std::string("\tExposureAutoLimitAuto set to ") + exposure_auto_limit_auto_);
-        } else {
-          log_warn(std::string("\tExposureAutoLimitAuto value '") + exposure_auto_limit_auto_ + "' not supported. Available values:");
-          GenApi::StringList_t entries;
-          pLimitAuto->GetSymbolics(entries);
-          for (const auto& entry : entries) {
-            log_warn(std::string("\t  - ") + entry.c_str());
-          }
-        }
-      } else {
-        log_warn("\tExposureAutoLimitAuto node not writable");
-      }
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ExposureAutoLimitAuto: ") + e.what());
-    }
-  }
-
-  // Set manual exposure limits (only effective when ExposureAutoLimitAuto is "Off")
-  if (is_passed_exposure_auto_upper_limit_) {
-    try {
-      Arena::SetNodeValue<double>(nodemap, "ExposureAutoUpperLimit", exposure_auto_upper_limit_);
-      log_info(std::string("\tExposureAutoUpperLimit set to ") + std::to_string(exposure_auto_upper_limit_));
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ExposureAutoUpperLimit: ") + e.what());
-    }
-  }
-
-  if (is_passed_exposure_auto_lower_limit_) {
-    try {
-      Arena::SetNodeValue<double>(nodemap, "ExposureAutoLowerLimit", exposure_auto_lower_limit_);
-      log_info(std::string("\tExposureAutoLowerLimit set to ") + std::to_string(exposure_auto_lower_limit_));
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ExposureAutoLowerLimit: ") + e.what());
-    }
-  }
-
-  // --- Step 4: If auto exposure is on, we're done (skip manual exposure) ---
-  if (auto_exposure_set && auto_exposure_ != "Off") {
-    return;
-  }
-
-  // --- Step 5: Manual exposure time ---
-  if (is_passed_exposure_time_) {
-    if (!is_passed_auto_exposure_) {
-      try {
-        // Ensure ExposureMode is Timed before disabling auto
-        Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureAuto", "Off");
-        log_info("\tExposureAuto set to Off");
-      } catch (GenICam::GenericException& e) {
-        log_warn(std::string("\tFailed to set ExposureAuto to Off: ") + e.what());
-      }
-    }
-    try {
-      Arena::SetNodeValue<double>(nodemap, "ExposureTime", exposure_time_);
-      log_info(std::string("\tExposureTime set to ") + std::to_string(exposure_time_));
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ExposureTime: ") + e.what());
-    }
-  }
-}
-
-void ArenaCameraNode::set_nodes_frame_rate_()
-{
-  auto nodemap = m_pDevice->GetNodeMap();
-  
-  // Set short exposure enable if specified
-  if (is_passed_short_exposure_enable_) {
-    try {
-      Arena::SetNodeValue<bool>(nodemap, "ShortExposureEnable", short_exposure_enable_);
-      log_info(std::string("\tShortExposureEnable set to: ") + 
-               (short_exposure_enable_ ? "true" : "false"));
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ShortExposureEnable: ") + e.what());
-    } catch (std::exception& e) {
-      log_warn(std::string("\tFailed to set ShortExposureEnable: ") + e.what());
-    }
-  }
-  
-  try {
-    // Set frame rate enable if specified
-    if (is_passed_acquisition_frame_rate_enable_) {
-      Arena::SetNodeValue<bool>(nodemap, "AcquisitionFrameRateEnable", acquisition_frame_rate_enable_);
-      log_info(std::string("\tAcquisitionFrameRateEnable set to ") + 
-               (acquisition_frame_rate_enable_ ? "true" : "false"));
-    }
-    
-    // Determine if frame rate control is enabled (either explicitly set or from camera)
-    bool frame_rate_enabled = is_passed_acquisition_frame_rate_enable_ 
-        ? acquisition_frame_rate_enable_ 
-        : Arena::GetNodeValue<bool>(nodemap, "AcquisitionFrameRateEnable");
-    
-    // If frame rate control is disabled, log and skip setting the frame rate value
-    if (!frame_rate_enabled) {
-      if (is_passed_acquisition_frame_rate_) {
-        log_info("\tFrame rate value specified but acquisition_frame_rate_enable is false. "
-                 "Frame rate control disabled, camera will run at maximum rate.");
-      } else {
-        log_debug("\tFrame rate control disabled, camera will run at maximum rate.");
-      }
-      return;
-    }
-    
-    // Set frame rate value if specified and enabled
-    if (is_passed_acquisition_frame_rate_) {
-      // Get the node to validate min/max
-      GenApi::CFloatPtr pAcquisitionFrameRate = nodemap->GetNode("AcquisitionFrameRate");
-      
-      if (pAcquisitionFrameRate && GenApi::IsWritable(pAcquisitionFrameRate)) {
-        double frame_rate = acquisition_frame_rate_;
-        
-        // Ensure frame rate is within valid range
-        if (frame_rate < pAcquisitionFrameRate->GetMin()) {
-          log_warn(std::string("\tRequested frame rate ") + std::to_string(frame_rate) + 
-                   " is below minimum. Setting to " + std::to_string(pAcquisitionFrameRate->GetMin()));
-          frame_rate = pAcquisitionFrameRate->GetMin();
-        }
-        if (frame_rate > pAcquisitionFrameRate->GetMax()) {
-          log_warn(std::string("\tRequested frame rate ") + std::to_string(frame_rate) + 
-                   " is above maximum. Setting to " + std::to_string(pAcquisitionFrameRate->GetMax()));
-          frame_rate = pAcquisitionFrameRate->GetMax();
-        }
-        
-        // Validate frame rate vs exposure time conflict
-        // Frame rate and exposure time are interdependent:
-        //   - max_exposure_time (in microseconds) ≈ 1,000,000 / frame_rate
-        // If the configured exposure time exceeds this limit, warn the user
-        if (is_passed_exposure_time_ && frame_rate > 0) {
-          // Calculate max exposure time in microseconds for given frame rate
-          double max_exposure_for_frame_rate = 1000000.0 / frame_rate;
-          if (exposure_time_ > max_exposure_for_frame_rate) {
-            log_warn(std::string("\tPotential conflict: Configured exposure time (") + 
-                     std::to_string(exposure_time_) + " us) exceeds maximum allowed by frame rate (" +
-                     std::to_string(max_exposure_for_frame_rate) + " us at " + 
-                     std::to_string(frame_rate) + " FPS). The camera may limit actual exposure time.");
-          }
-        }
-        
-        Arena::SetNodeValue<double>(nodemap, "AcquisitionFrameRate", frame_rate);
-        log_info(std::string("\tAcquisitionFrameRate set to ") + std::to_string(frame_rate) + " FPS");
-      } else {
-        log_warn("\tAcquisitionFrameRate node not writable");
-      }
-    } else {
-      log_info("\tFrame rate control enabled but no frame rate value specified. Using camera default.");
-    }
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tFrame rate configuration warning: ") + e.what());
-  } catch (std::exception& e) {
-    log_warn(std::string("\tFrame rate configuration warning: ") + e.what());
-  }
-}
-
-void ArenaCameraNode::set_nodes_trigger_mode_()
-{
-  try {
-    auto nodemap = m_pDevice->GetNodeMap();
-    if (trigger_mode_activated_) {
-      if (exposure_time_ < 0) {
-        log_warn(
-            "\tavoid long waits wating for triggered images by providing proper "
-            "exposure_time.");
-      }
-      // Enable trigger mode before setting the source and selector
-      // and before starting the stream. Trigger mode cannot be turned
-      // on and off while the device is streaming.
-
-      // Make sure Trigger Mode set to 'Off' after finishing this example
-      Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode", "On");
-
-      // Set the trigger source to software in order to trigger buffers
-      // without the use of any additional hardware.
-      // Lines of the GPIO can also be used to trigger.
-      Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerSource",
-                                             "Software");
-      Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerSelector",
-                                             "FrameStart");
-      auto msg =
-          std::string(
-              "\ttrigger_mode is activated. To trigger an image run `ros2 run ") +
-          this->get_name() + " trigger_image`";
-      log_warn(msg);
-    }
-    // unset device from being in trigger mode if user did not pass trigger
-    // mode parameter because the trigger nodes are not rest when loading
-    // the user default profile
-    else {
-      Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode", "Off");
-    }
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tTrigger mode configuration skipped: ") + e.what());
-  } catch (std::exception& e) {
-    log_warn(std::string("\tTrigger mode configuration skipped: ") + e.what());
-  }
-}
-
-// just for debugging
-void ArenaCameraNode::set_nodes_test_pattern_image_()
-{
-  auto nodemap = m_pDevice->GetNodeMap();
-  Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TestPattern", "Pattern3");
-}
-
-void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat)
-{
-  // Take a snapshot of stats under the mutex to avoid data races with the grab thread.
-  double calculated_fps;
-  bool watchdog_initialized, camera_frozen, just_froze = false;
-  double elapsed_since_last_frame = 0.0;
-  {
-    std::lock_guard<std::mutex> slock(m_stats_mutex_);
-    calculated_fps       = m_calculated_fps_;
-    watchdog_initialized = m_watchdog_initialized_;
-    camera_frozen        = m_camera_frozen_;
-
-    if (watchdog_initialized) {
-      auto now = std::chrono::steady_clock::now();
-      elapsed_since_last_frame = std::chrono::duration<double>(now - m_last_frame_time_).count();
-
-      // Watchdog: detect frozen camera (no new frames within timeout)
-      if (m_device_connected_ && !trigger_mode_activated_ &&
-          elapsed_since_last_frame > watchdog_timeout_sec_ && !m_camera_frozen_) {
-        m_camera_frozen_ = true;
-        camera_frozen    = true;
-        just_froze       = true;
-      }
-    }
-  }
-
-  // Log outside the lock (log calls can be slow)
-  if (just_froze) {
-    log_err("Watchdog: Camera appears frozen - no new frames for " +
-            std::to_string(elapsed_since_last_frame) + "s (timeout: " +
-            std::to_string(watchdog_timeout_sec_) + "s). Last frame " +
-            std::to_string(m_images_published_) + " published.");
-  }
-
-  if (m_device_connected_) {
-    if (camera_frozen) {
-      stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR,
-                   "Camera frozen - no new frames received");
-    } else if (m_image_publish_errors_ > 0 || m_backpressure_events_ > 0 || m_incomplete_frames_ > 0) {
-      std::string warn_msg = "Camera connected with";
-      if (m_image_publish_errors_ > 0) {
-        warn_msg += " errors";
-      }
-      if (m_backpressure_events_ > 0) {
-        if (m_image_publish_errors_ > 0) warn_msg += " and";
-        warn_msg += " backpressure";
-      }
-      if (m_incomplete_frames_ > 0) {
-        if (m_image_publish_errors_ > 0 || m_backpressure_events_ > 0) warn_msg += " and";
-        warn_msg += " incomplete frames";
-      }
-      stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, warn_msg);
-    } else {
-      stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK,
-                   "Camera operating normally");
-    }
-  } else {
-    stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR,
-                 "Camera not connected");
-  }
-
-  stat.add("Device Connected", m_device_connected_ ? "true" : "false");
-  stat.add("Images Published", std::to_string(m_images_published_));
-  stat.add("Publish Errors", std::to_string(m_image_publish_errors_));
-  stat.add("Incomplete Frames", std::to_string(m_incomplete_frames_));
-  stat.add("Calculated FPS", std::to_string(calculated_fps));
-  stat.add("Trigger Mode", trigger_mode_activated_ ? "enabled" : "disabled");
-  stat.add("Topic", topic_);
-  
-  // Backpressure metrics (Task 4)
-  stat.add("Backpressure Events", std::to_string(m_backpressure_events_));
-  stat.add("Last Processing Time (ms)", std::to_string(m_last_processing_time_ms_));
-  stat.add("Max Processing Time (ms)", std::to_string(m_max_processing_time_ms_));
-  if (m_processing_time_samples_ > 0) {
-    double avg_processing_time = m_total_processing_time_ms_ / m_processing_time_samples_;
-    stat.add("Avg Processing Time (ms)", std::to_string(avg_processing_time));
-  } else {
-    stat.add("Avg Processing Time (ms)", "N/A");
-  }
-  stat.add("Processing Time Samples", std::to_string(m_processing_time_samples_));
-  
-  // Watchdog metrics
-  stat.add("Camera Frozen", camera_frozen ? "true" : "false");
-  stat.add("Watchdog Timeout (sec)", std::to_string(watchdog_timeout_sec_));
-  if (watchdog_initialized) {
-    stat.add("Time Since Last Frame (sec)", std::to_string(elapsed_since_last_frame));
-  } else {
-    stat.add("Time Since Last Frame (sec)", "N/A (no frames yet)");
-  }
-
-  if (m_device_connected_) {
-    stat.add("Serial", serial_.empty() ? "first discovered" : serial_);
-    stat.add("Width", std::to_string(width_));
-    stat.add("Height", std::to_string(height_));
-    stat.add("Pixel Format", pixelformat_ros_);
-
-    // Rate-limited GenICam register reads — only every DIAG_GENICAM_READ_INTERVAL_SEC
-    // to avoid competing with GigE Vision streaming for register access.
-    auto now_diag = std::chrono::steady_clock::now();
-    double diag_elapsed = m_diag_genicam_cache_valid_
-        ? std::chrono::duration<double>(now_diag - m_last_diag_genicam_read_time_).count()
-        : DIAG_GENICAM_READ_INTERVAL_SEC + 1.0;  // force first read
-
-    if (diag_elapsed >= DIAG_GENICAM_READ_INTERVAL_SEC) {
-      m_diag_genicam_cache_.clear();
-      try {
-        auto nodemap = m_pDevice->GetNodeMap();
-
-        // Helper: attempt a read, cache on success, silently skip on failure
-        auto try_read = [&](const char* diag_key, auto reader) {
-          try { m_diag_genicam_cache_[diag_key] = reader(nodemap); } catch (...) {}
-        };
-
-        // Frame rate
-        try_read("AcquisitionFrameRateEnable", [](auto nm) {
-          return Arena::GetNodeValue<bool>(nm, "AcquisitionFrameRateEnable") ? "true" : "false";
-        });
-        try_read("AcquisitionFrameRate (FPS)", [](auto nm) {
-          bool en = Arena::GetNodeValue<bool>(nm, "AcquisitionFrameRateEnable");
-          if (en) return std::to_string(Arena::GetNodeValue<double>(nm, "AcquisitionFrameRate"));
-          return std::string("disabled (max)");
-        });
-
-        // Gain
-        try_read("Gain (dB)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "Gain")); });
-        try_read("GainRaw", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "GainRaw")); });
-        try_read("GainAuto", [](auto nm) {
-          GenICam::gcstring v = Arena::GetNodeValue<GenICam::gcstring>(nm, "GainAuto"); return std::string(v.c_str());
-        });
-
-        // Exposure
-        try_read("ExposureTime (us)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "ExposureTime")); });
-        try_read("ExposureTimeRaw", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "ExposureTimeRaw")); });
-        try_read("ExposureAuto", [](auto nm) {
-          GenICam::gcstring v = Arena::GetNodeValue<GenICam::gcstring>(nm, "ExposureAuto"); return std::string(v.c_str());
-        });
-        // Image statistics (next to exposure for easy comparison)
-        try_read("TargetBrightness", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "TargetBrightness")); });
-        try_read("CalculatedMean", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "CalculatedMean")); });
-        try_read("CalculatedMedian", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "CalculatedMedian")); });
-
-        // Auto exposure details (optional nodes)
-        try_read("ExposureAutoUpperLimit (us)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "ExposureAutoUpperLimit")); });
-        try_read("ExposureAutoLowerLimit (us)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "ExposureAutoLowerLimit")); });
-        try_read("ExposureAutoLimitAuto", [](auto nm) {
-          GenICam::gcstring v = Arena::GetNodeValue<GenICam::gcstring>(nm, "ExposureAutoLimitAuto"); return std::string(v.c_str());
-        });
-        try_read("ExposureAutoAlgorithm", [](auto nm) {
-          GenICam::gcstring v = Arena::GetNodeValue<GenICam::gcstring>(nm, "ExposureAutoAlgorithm"); return std::string(v.c_str());
-        });
-        try_read("ExposureAutoDamping", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "ExposureAutoDamping")); });
-
-        // Misc
-        try_read("ShortExposureEnable", [](auto nm) {
-          return Arena::GetNodeValue<bool>(nm, "ShortExposureEnable") ? "true" : "false";
-        });
-        try_read("DevicePower (W)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "DevicePower")); });
-        try_read("DeviceUpTime (ms)", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "DeviceUpTime")); });
-        try_read("LinkUpTime (ms)", [](auto nm) { return std::to_string(Arena::GetNodeValue<int64_t>(nm, "LinkUpTime")); });
-        try_read("DeviceTemperature (C)", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "DeviceTemperature")); });
-
-        m_last_diag_genicam_read_time_ = now_diag;
-        m_diag_genicam_cache_valid_ = true;
-
-      } catch (GenICam::GenericException& e) {
-        m_diag_genicam_cache_["Camera Parameters"] = std::string("GenICam error: ") + e.what();
-        m_diag_genicam_cache_valid_ = true;
-        m_last_diag_genicam_read_time_ = now_diag;
-      } catch (const std::exception& e) {
-        m_diag_genicam_cache_["Camera Parameters"] = std::string("error: ") + e.what();
-        m_diag_genicam_cache_valid_ = true;
-        m_last_diag_genicam_read_time_ = now_diag;
-      } catch (...) {
-        m_diag_genicam_cache_["Camera Parameters"] = "unknown error reading camera parameters";
-        m_diag_genicam_cache_valid_ = true;
-        m_last_diag_genicam_read_time_ = now_diag;
-      }
-    }
-
-    // Report cached values
-    for (const auto& kv : m_diag_genicam_cache_) {
-      stat.add(kv.first, kv.second);
-    }
-    if (m_diag_genicam_cache_valid_) {
-      stat.add("Diag GenICam Age (sec)", std::to_string(
-          std::chrono::duration<double>(
-              std::chrono::steady_clock::now() - m_last_diag_genicam_read_time_).count()));
-    }
-  }
-}
+// produce_diagnostics_() is in diagnostics.cpp

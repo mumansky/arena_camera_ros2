@@ -1,3 +1,4 @@
+#pragma once
 
 #include <map>
 #include <string>
@@ -39,7 +40,7 @@ static bool is_supported_qos_reliability_policy(std::string policy)
          K_CMDLN_PARAMETER_TO_QOS_RELIABILITY_POLICY.end();
 }
 
-static bool is_supported_qos_histroy_policy(std::string policy)
+static bool is_supported_qos_history_policy(std::string policy)
 {
   return K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY.find(policy) !=
          K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY.end();
