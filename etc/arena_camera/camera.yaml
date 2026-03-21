@@ -26,7 +26,7 @@
     # Path to intrinsic calibration YAML produced by camera_calibration / cameracalibrator.py.
     # Published on <topic>/camera_info alongside every image.
     # If not set, camera_info is published with an empty (uncalibrated) calibration.
-    camera_info_url: "file:///home/mark/Documents/git/arena_camera_ros2/etc/arena_camera/lucid_fisheye.yaml"
+    camera_info_url: "package://arena_camera_node/calibration/lucid_fisheye.yaml"
 
     # Timestamp Source
     # ----------------

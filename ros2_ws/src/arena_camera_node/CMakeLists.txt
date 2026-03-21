@@ -89,6 +89,14 @@ install(
   DESTINATION share/${PROJECT_NAME}/
 )
 
+# install calibration files.
+install(
+  DIRECTORY ${CMAKE_SOURCE_DIR}/../../../etc/arena_camera/
+  DESTINATION share/${PROJECT_NAME}/calibration
+  FILES_MATCHING PATTERN "*.yaml"
+  PATTERN "camera.yaml" EXCLUDE
+)
+
 # --------
 # HEADERS
 # --------
