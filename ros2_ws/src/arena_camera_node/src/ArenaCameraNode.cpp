@@ -40,6 +40,7 @@
  * Trigger mode uses blocking GetImage() in publish_an_image_on_trigger_().
  */
 
+#include <cinttypes>  // PRId64, PRIu64
 #include <cstring>    // memcpy
 #include <cmath>      // std::atan2, std::acos, std::clamp
 #include <algorithm>  // std::clamp
@@ -162,7 +163,8 @@ void ArenaCameraNode::parse_parameters_()
     frame_id_ = config_string(m_config_params_, "frame_id", "camera_optical_frame");
 
     currentParam = "use_camera_timestamp";
-    use_camera_timestamp_ = config_bool(m_config_params_, "use_camera_timestamp", false);
+    // use_camera_timestamp_ removed — timestamping is now automatic:
+    // PTP synced (PtpStatus=Slave) → camera hardware clock; otherwise → ROS clock.
 
     currentParam = "camera_info_url";
     camera_info_url_ = config_string(m_config_params_, "camera_info_url", "");
@@ -847,6 +849,44 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
       format_logged = true;
     }
 
+    // On first frame: read PTP sync status and measure the clock offset between
+    // the camera's hardware clock and the ROS system clock.
+    // The driver still uses this->now() for timestamps — this is diagnostic only.
+    static bool clock_offset_logged = false;
+    if (!clock_offset_logged) {
+      // Read PTP status from camera
+      std::string ptp_status = "unknown";
+      int64_t ptp_offset_ns = 0;
+      try {
+        auto nodemap = m_pDevice->GetNodeMap();
+        GenICam::gcstring s = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "PtpStatus");
+        ptp_status = std::string(s.c_str());
+        try {
+          ptp_offset_ns = Arena::GetNodeValue<int64_t>(nodemap, "PtpOffsetFromMaster");
+        } catch (...) {}
+      } catch (...) {}
+
+      bool ptp_synced = (ptp_status == "Slave");
+      m_ptp_synced_.store(ptp_synced);
+
+      uint64_t cam_ns    = pImage->GetTimestampNs();
+      int64_t  ros_ns    = this->now().nanoseconds();
+      int64_t  offset_ms = (ros_ns - static_cast<int64_t>(cam_ns)) / 1000000;
+
+      if (ptp_synced) {
+        RCLCPP_INFO(this->get_logger(),
+            "PTP synchronized (Slave) — using camera hardware timestamps. "
+            "Camera-ROS offset: %" PRId64 " ms, PtpOffsetFromMaster: %" PRId64 " ns",
+            offset_ms, ptp_offset_ns);
+      } else {
+        RCLCPP_WARN(this->get_logger(),
+            "PTP NOT synchronized (PtpStatus: %s) — falling back to ROS system clock. "
+            "Camera-ROS offset: %" PRId64 " ms. Run ptp4l on the host for accurate timestamps.",
+            ptp_status.c_str(), offset_ms);
+      }
+      clock_offset_logged = true;
+    }
+
     // --- Publish raw image if enabled ---
     if (publish_raw_ && m_pub_) {
       auto p_image_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -1320,13 +1360,16 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
 
 void ArenaCameraNode::fill_header_(std_msgs::msg::Header& header, Arena::IImage* pImage)
 {
-  if (use_camera_timestamp_) {
-    // Use camera hardware/PTP clock. Only valid when PTP is synchronized.
+  if (m_ptp_synced_.load()) {
+    // PTP synchronized: camera clock tracks wall time — use hardware timestamp
+    // for accurate exposure-time alignment with IMU/LiDAR.
     uint64_t ts_ns = pImage->GetTimestampNs();
-    header.stamp.sec    = static_cast<int32_t>(ts_ns / 1000000000ULL);
+    header.stamp.sec     = static_cast<int32_t>(ts_ns / 1000000000ULL);
     header.stamp.nanosec = static_cast<uint32_t>(ts_ns % 1000000000ULL);
   } else {
-    // Default: ROS system clock — required for sensor fusion with IMU/LiDAR.
+    // No PTP: fall back to ROS system clock at processing time.
+    // This has ~2-15 ms jitter vs true exposure time but is at least
+    // in the correct time domain for downstream consumers.
     header.stamp = this->now();
   }
   header.frame_id = frame_id_;

@@ -264,8 +264,8 @@ class ArenaCameraNode : public rclcpp::Node
   bool is_passed_topic_;
 
   std::string frame_id_;              // TF coordinate frame name for all published images
-  bool use_camera_timestamp_;         // true = camera hardware clock; false = ROS clock (default)
   std::string camera_info_url_;       // file:// URL to calibration YAML (empty = uncalibrated)
+  std::atomic<bool> m_ptp_synced_{false}; // true when camera PtpStatus == "Slave"
 
   size_t width_;
   bool is_passed_width;

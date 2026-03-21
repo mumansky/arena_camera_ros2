@@ -168,6 +168,23 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
         });
         try_read("ExposureAutoDamping", [](auto nm) { return std::to_string(Arena::GetNodeValue<double>(nm, "ExposureAutoDamping")); });
 
+        // PTP sync status — single combined entry; also updates the atomic used by fill_header_()
+        try {
+          GenICam::gcstring s = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "PtpStatus");
+          std::string status(s.c_str());
+          bool synced = (status == "Slave");
+          m_ptp_synced_.store(synced);
+          if (synced) {
+            int64_t offset_ns = 0;
+            try { offset_ns = Arena::GetNodeValue<int64_t>(nodemap, "PtpOffsetFromMaster"); } catch (...) {}
+            m_diag_genicam_cache_["PTP"] = "Synchronized (offset: " + std::to_string(offset_ns) + " ns)";
+          } else {
+            m_diag_genicam_cache_["PTP"] = "NOT synchronized (status: " + status + ")";
+          }
+        } catch (...) {
+          m_diag_genicam_cache_["PTP"] = "unavailable";
+        }
+
         // Misc
         try_read("ShortExposureEnable", [](auto nm) {
           return Arena::GetNodeValue<bool>(nm, "ShortExposureEnable") ? "true" : "false";

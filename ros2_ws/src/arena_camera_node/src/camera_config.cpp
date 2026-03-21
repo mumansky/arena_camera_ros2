@@ -97,6 +97,35 @@ void ArenaCameraNode::set_nodes_()
   }
   log_debug("Stream configuration completed");
 
+  // Enable PTP in slave-only mode — camera will sync to an external master
+  // but will never self-elect as master via the BMCA algorithm.
+  try {
+    auto nodemap = m_pDevice->GetNodeMap();
+
+    // Prefer PtpSlaveOnly if available — hard prevents master election.
+    // Fall back to setting PtpPriority1=255 (worst possible) which makes
+    // master election practically impossible even if SlaveOnly is unsupported.
+    bool slave_only_set = false;
+    try {
+      Arena::SetNodeValue<bool>(nodemap, "PtpSlaveOnly", true);
+      slave_only_set = true;
+      log_info("\tPTP slave-only mode enabled");
+    } catch (...) {
+      try {
+        Arena::SetNodeValue<int64_t>(nodemap, "PtpPriority1", 255);
+        log_info("\tPTP PtpPriority1 set to 255 (slave-only fallback)");
+      } catch (...) {}
+    }
+    (void)slave_only_set;
+
+    Arena::SetNodeValue<bool>(nodemap, "PtpEnable", true);
+    log_info("\tPTP enabled — camera will sync to network master, never self-elect");
+  } catch (GenICam::GenericException& e) {
+    log_warn(std::string("\tCould not enable PTP (camera may not support it): ") + e.what());
+  } catch (std::exception& e) {
+    log_warn(std::string("\tCould not enable PTP: ") + e.what());
+  }
+
   //set_nodes_test_pattern_image_();
 }
 
