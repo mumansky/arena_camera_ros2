@@ -49,6 +49,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(diagnostic_updater REQUIRED)
+find_package(camera_info_manager REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(arena_sdk REQUIRED)
 find_package(OpenCV REQUIRED)
@@ -88,6 +89,14 @@ install(
   DESTINATION share/${PROJECT_NAME}/
 )
 
+# install calibration files.
+install(
+  DIRECTORY ${CMAKE_SOURCE_DIR}/../../../etc/arena_camera/
+  DESTINATION share/${PROJECT_NAME}/calibration
+  FILES_MATCHING PATTERN "*.yaml"
+  PATTERN "camera.yaml" EXCLUDE
+)
+
 # --------
 # HEADERS
 # --------
@@ -121,6 +130,7 @@ add_executable(${target_name}
     src/diagnostics.cpp
     src/light_arena/deviceinfo_helper.cpp
     src/rclcpp_adapter/pixelformat_translation.cpp
+    src/rclcpp_adapter/quality_of_service_translation.cpp
 )
 
 target_include_directories(${target_name}
@@ -159,6 +169,87 @@ target_link_libraries(${target_name} yaml-cpp)
 # OpenCV is required by ArenaSDK's libarena.so
 target_link_libraries(${target_name} ${OpenCV_LIBS})
 
+# --------------------------------------------------------------------------
+# Optional: CUDA — nvJPEG hardware JPEG encoding + fused polarization kernel
+# nvjpeg_encoder.cpp is pure C++ — no nvcc needed.
+# polarization_kernels.cu requires nvcc (CUDA language).
+# On JetPack, headers land in /usr/local/cuda-<ver>/targets/<arch>/include/
+# after: sudo apt install cuda-cudart-dev-12-6 libnvjpeg-dev-12-6 cuda-crt-12-6
+# Gracefully skipped on x86 hosts that don't have CUDA installed.
+# --------------------------------------------------------------------------
+
+# Discover versioned CUDA target dirs (e.g. cuda-12.6/targets/aarch64-linux)
+# so we don't hard-code the CUDA version or architecture.
+file(GLOB _cuda_inc_hints
+  "/usr/local/cuda/targets/*/include"
+  "/usr/local/cuda-*/targets/*/include"
+  "/usr/local/cuda/include")
+file(GLOB _cuda_lib_hints
+  "/usr/local/cuda/targets/*/lib"
+  "/usr/local/cuda-*/targets/*/lib"
+  "/usr/local/cuda/lib64")
+
+# These are CACHE variables — unset them so each configure re-evaluates
+# (prevents stale NOTFOUND values from a prior failed configure).
+unset(CUDA_INCLUDE_DIR CACHE)
+unset(NVJPEG_LIB CACHE)
+unset(CUDART_LIB CACHE)
+
+find_path(CUDA_INCLUDE_DIR cuda_runtime.h
+  HINTS ${_cuda_inc_hints} ENV CUDA_PATH
+  PATHS /usr/local/cuda/include /usr/include
+  NO_DEFAULT_PATH)
+
+find_library(NVJPEG_LIB nvjpeg
+  HINTS ${_cuda_lib_hints} ENV CUDA_PATH
+  PATHS /usr/local/cuda/lib64 /usr/lib/aarch64-linux-gnu/nvidia /usr/lib/aarch64-linux-gnu
+  NO_DEFAULT_PATH)
+
+find_library(CUDART_LIB cudart
+  HINTS ${_cuda_lib_hints} ENV CUDA_PATH
+  PATHS /usr/local/cuda/lib64 /usr/lib/aarch64-linux-gnu
+  NO_DEFAULT_PATH)
+
+if(CUDA_INCLUDE_DIR AND NVJPEG_LIB AND CUDART_LIB)
+  message(STATUS "nvJPEG hardware JPEG encoding enabled")
+  message(STATUS "  cuda headers : ${CUDA_INCLUDE_DIR}")
+  message(STATUS "  libnvjpeg    : ${NVJPEG_LIB}")
+  message(STATUS "  libcudart    : ${CUDART_LIB}")
+  target_compile_definitions(${target_name} PRIVATE HAS_CUDA)
+  target_include_directories(${target_name} PRIVATE ${CUDA_INCLUDE_DIR})
+  target_link_libraries(${target_name} ${NVJPEG_LIB} ${CUDART_LIB})
+  target_sources(${target_name} PRIVATE src/nvjpeg_encoder.cpp)
+
+  # Fused polarization kernel — requires nvcc
+  include(CheckLanguage)
+  check_language(CUDA)
+  if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+    # Orin is SM 8.7; allow override via -DCMAKE_CUDA_ARCHITECTURES=<arch>
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+      set(CMAKE_CUDA_ARCHITECTURES 87)
+    endif()
+    message(STATUS "CUDA polarization kernel enabled (SM ${CMAKE_CUDA_ARCHITECTURES})")
+    target_sources(${target_name} PRIVATE src/polarization_kernels.cu)
+    set_source_files_properties(src/polarization_kernels.cu
+      PROPERTIES COMPILE_OPTIONS "--expt-relaxed-constexpr")
+    set_target_properties(${target_name} PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+    target_compile_definitions(${target_name} PRIVATE HAS_POLAR_KERNEL)
+  else()
+    message(STATUS "nvcc not found — polarization kernel disabled (CPU fallback active)")
+  endif()
+else()
+  message(STATUS "nvJPEG not available — software JPEG encoding + CPU polarization (cv::imencode)")
+  if(NOT CUDA_INCLUDE_DIR)
+    message(STATUS "  missing: cuda_runtime.h  →  sudo apt install cuda-cudart-dev-12-6")
+  endif()
+  if(NOT NVJPEG_LIB)
+    message(STATUS "  missing: libnvjpeg.so    →  sudo apt install libnvjpeg-dev-12-6")
+  endif()
+  if(NOT CUDART_LIB)
+    message(STATUS "  missing: libcudart.so    →  sudo apt install cuda-cudart-dev-12-6")
+  endif()
+endif()
 
 # MV EXEC to lib dir
 install(TARGETS
@@ -254,6 +345,7 @@ if(BUILD_TESTING)
   # QoS translation tests
   ament_add_gtest(test_qos_translation
     test/test_qos_translation.cpp
+    src/rclcpp_adapter/quality_of_service_translation.cpp
   )
   target_include_directories(test_qos_translation PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src

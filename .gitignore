@@ -13,3 +13,5 @@ _codeql_detected_source_root
 *.whl
 .vscode
 persist.json
+.claude/settings.local.json
+.claude/

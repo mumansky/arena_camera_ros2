@@ -149,6 +149,10 @@ TEST(PixelFormatTranslationTest, UnknownFormatsNotPresent)
  */
 TEST(PixelFormatTranslationTest, MapSizesMatch)
 {
+  // Sanity check: maps are non-empty
+  EXPECT_GT(K_ROS2_PIXELFORMAT_TO_PFNC.size(), 0u);
+  EXPECT_GT(K_PFNC_TO_ROS2_PIXELFORMAT.size(), 0u);
+  // Both directions must have identical entry counts
   EXPECT_EQ(K_ROS2_PIXELFORMAT_TO_PFNC.size(), K_PFNC_TO_ROS2_PIXELFORMAT.size());
 }
 

@@ -31,11 +31,11 @@
 #include <rclcpp/timer.hpp>           // WallTimer
 #include <sensor_msgs/msg/image.hpp>  //image msg published
 #include <sensor_msgs/msg/compressed_image.hpp>  // compressed image
-#include <sensor_msgs/msg/camera_info.hpp>  // camera calibration
+#include <sensor_msgs/msg/camera_info.hpp>        // camera_info
 #include <std_msgs/msg/header.hpp>    // for fill_header_ helper
 #include <std_srvs/srv/trigger.hpp>   // Trigger
 #include <diagnostic_updater/diagnostic_updater.hpp>  // diagnostics
-#include <camera_info_manager/camera_info_manager.hpp>  // calibration file loader
+#include <camera_info_manager/camera_info_manager.hpp>  // calibration file loading
 
 // arena sdk
 #include "ArenaApi.h"
@@ -43,6 +43,14 @@
 
 // OpenCV (for cv::Mat in compute_and_publish_dolp_aolp_ signature)
 #include <opencv2/core.hpp>
+
+// Optional CUDA extensions (Orin/Jetson; no-op on x86 without CUDA)
+#ifdef HAS_CUDA
+#include "nvjpeg_encoder.h"
+#endif
+#ifdef HAS_POLAR_KERNEL
+#include "polarization_kernels.h"
+#endif
 
 class ArenaCameraNode : public rclcpp::Node
 {
@@ -193,8 +201,6 @@ class ArenaCameraNode : public rclcpp::Node
 
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_compressed_;
-  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr m_camera_info_pub_;
-  std::shared_ptr<camera_info_manager::CameraInfoManager> m_camera_info_manager_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_pol_0deg_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_pol_0deg_compressed_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_pol_45deg_;
@@ -209,6 +215,17 @@ class ArenaCameraNode : public rclcpp::Node
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_dolp_compressed_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_aolp_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_aolp_compressed_;
+  // Stokes parameter publishers (S0, S1, S2 — mono8 encoded)
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_stokes_s0_;
+  rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_stokes_s0_compressed_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_stokes_s1_;
+  rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_stokes_s1_compressed_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_stokes_s2_;
+  rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_stokes_s2_compressed_;
+  // False-color AoLP visualization (compressed BGR/HSV colormap)
+  rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_aolp_color_compressed_;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr m_pub_camera_info_;
+  std::unique_ptr<camera_info_manager::CameraInfoManager> m_camera_info_manager_;
   rclcpp::TimerBase::SharedPtr m_wait_for_device_timer_callback_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr m_trigger_an_image_srv_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr m_param_callback_handle_;
@@ -329,8 +346,27 @@ class ArenaCameraNode : public rclcpp::Node
 
   bool publish_raw_;
   bool publish_compressed_;
+  bool publish_pol_channels_;  // Publish 4 per-angle BGR channel images (0/45/90/135 deg)
+  bool publish_pol_max_;       // Publish max-combined polarization image
   bool publish_dolp_;
   bool publish_aolp_;
+  bool publish_stokes_;           // Publish S0/S1/S2 Stokes parameter images
+  bool publish_aolp_color_;       // Publish false-color HSV AoLP visualization
+  // Latency profiling
+  std::string latency_mode_;      // "off" | "callback" | "hardware" | "both"
+  bool profile_latency_{false};             // true when any latency mode is active
+  bool use_hw_timestamp_for_latency_{false}; // true when "hardware" or "both"
+  // m_callback_t0_ns_: nanoseconds from steady_clock epoch, set in handle_camera_image_
+  std::atomic<int64_t> m_callback_t0_ns_{0};
+  std::atomic<double> m_last_callback_latency_ms_{0.0};
+  std::atomic<double> m_last_hw_latency_ms_{0.0};
+
+  // Camera reconnection
+  int reconnect_max_attempts_;    // 0 = infinite retries
+  std::atomic<bool> m_reconnecting_{false};
+  uint64_t m_reconnect_count_{0};
+  uint64_t m_reconnect_errors_{0};
+  void reconnect_();
   
   // Debug display window (OpenCV imshow)
   bool display_images_;               // Config: show tiled debug window
@@ -341,6 +377,16 @@ class ArenaCameraNode : public rclcpp::Node
   cv::Mat m_undistort_map1_, m_undistort_map2_;
   
   int jpeg_quality_;  // JPEG compression quality (1-100, default 80)
+  bool profile_processing_;  // Log per-frame timing breakdown for each processing stage
+  std::string gpu_acceleration_;  // "auto" | "gpu" | "cpu" (from camera.yaml)
+  bool use_gpu_jpeg_{false};      // Runtime: true when nvJPEG encoder is active
+  bool use_gpu_polar_{false};     // Runtime: true when CUDA polarization kernel is active
+#ifdef HAS_CUDA
+  std::unique_ptr<NvJpegEncoder> nvjpeg_encoder_;
+#endif
+#ifdef HAS_POLAR_KERNEL
+  PolarKernelBuffers polar_bufs_;
+#endif
   
   // Watchdog settings (Task 20)
   double watchdog_timeout_sec_;  // Seconds without a new frame before declaring camera frozen (default 5.0)
@@ -397,11 +443,21 @@ class ArenaCameraNode : public rclcpp::Node
   // Diagnostics
   void produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat);
 
-  // Shared helper: compute DOLP and AoLP from 4 polarization channels and publish.
+  // Encode img (CV_8UC3 BGR or CV_8UC1 mono8) to JPEG bytes.
+  // Uses nvJPEG hardware encoder when available; falls back to cv::imencode.
+  void jpeg_encode_(const cv::Mat& img, std::vector<uint8_t>& out);
+
+  // Shared helper: compute DOLP and AoLP and publish.
+  // cached_bgr[4]: CV_8UC3 mats from per-channel Bayer→BGR conversion (CPU fallback).
+  // raw_ch[4]:     raw mono8 channel pointers from SplitChannels (w*h bytes each,
+  //                contiguous). Used by the GPU path to skip the BGR→gray step entirely.
+  //                Pass nullptr on each entry to force CPU path for that frame.
   // out_dolp / out_aolp (optional) receive clones of the computed images for display.
   void compute_and_publish_dolp_aolp_(
       Arena::IImage* pImage,
-      const arena_camera::ArenaImageVector& channels,
+      const cv::Mat cached_bgr[4],
+      const uint8_t* const raw_ch[4],
+      int raw_w, int raw_h,
       cv::Mat* out_dolp = nullptr,
       cv::Mat* out_aolp = nullptr);
 };

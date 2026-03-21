@@ -39,13 +39,11 @@ TEST(ConfigHelpersTest, ConfigStringReturnsDefaultOnNullNode)
 
 TEST(ConfigHelpersTest, ConfigStringReturnsDefaultOnTypeMismatch)
 {
-  // Create a YAML node with a sequence value (not a string)
+  // A map node cannot be converted to string — yaml-cpp throws, we fall back to default.
   YAML::Node config;
-  config["key"] = YAML::Load("[1, 2, 3]");
-  // Attempting to read a sequence as string should fall through to default
+  config["key"] = YAML::Load("{a: 1, b: 2}");
   std::string result = config_string(config, "key", "default_val");
-  // yaml-cpp may convert some types to string; the key point is no crash
-  EXPECT_FALSE(result.empty());
+  EXPECT_EQ(result, "default_val");
 }
 
 // ============================================================================
@@ -167,6 +165,103 @@ TEST(ConfigHelpersTest, ConfigHasReturnsFalseOnNullNode)
   EXPECT_FALSE(config_has(config, "key"));
 }
 
+TEST(ConfigHelpersTest, ConfigHasReturnsTrueOnExplicitlyNullValue)
+{
+  // yaml-cpp: a key with a null value (e.g. "key: ~") still exists in the map,
+  // so config_has returns true. Note: yaml-cpp converts null to the string "null"
+  // rather than throwing, so config_string will NOT fall back to the default.
+  YAML::Node config = YAML::Load("key: ~");
+  EXPECT_TRUE(config_has(config, "key"));
+}
+
+// ============================================================================
+// Tests for config_has_value (key present AND non-null)
+// ============================================================================
+
+TEST(ConfigHelpersTest, ConfigHasValueReturnsTrueWhenPresent)
+{
+  YAML::Node config;
+  config["key"] = "value";
+  EXPECT_TRUE(config_has_value(config, "key"));
+}
+
+TEST(ConfigHelpersTest, ConfigHasValueReturnsFalseWhenMissing)
+{
+  YAML::Node config;
+  EXPECT_FALSE(config_has_value(config, "key"));
+}
+
+TEST(ConfigHelpersTest, ConfigHasValueReturnsFalseOnExplicitlyNullValue)
+{
+  // Unlike config_has, a null value (key: ~) is treated as absent.
+  YAML::Node config = YAML::Load("key: ~");
+  EXPECT_FALSE(config_has_value(config, "key"));
+}
+
+TEST(ConfigHelpersTest, ConfigHasValueReturnsTrueForBoolFalse)
+{
+  // A bool false is a valid non-null value — must not be confused with "absent".
+  YAML::Node config;
+  config["acquisition_frame_rate_enable"] = false;
+  EXPECT_TRUE(config_has_value(config, "acquisition_frame_rate_enable"));
+}
+
+TEST(ConfigHelpersTest, ConfigHasValueReturnsTrueForZeroInt)
+{
+  YAML::Node config;
+  config["stream_buffer_count"] = 0;
+  EXPECT_TRUE(config_has_value(config, "stream_buffer_count"));
+}
+
+// ============================================================================
+// Additional config_double edge cases
+// ============================================================================
+
+TEST(ConfigHelpersTest, ConfigDoubleAcceptsZero)
+{
+  YAML::Node config;
+  config["timeout"] = 0.0;
+  EXPECT_DOUBLE_EQ(config_double(config, "timeout", 5.0), 0.0);
+}
+
+TEST(ConfigHelpersTest, ConfigDoubleAcceptsNegativeValue)
+{
+  YAML::Node config;
+  config["val"] = -3.5;
+  EXPECT_DOUBLE_EQ(config_double(config, "val", 0.0), -3.5);
+}
+
+// ============================================================================
+// Tests for gpu_acceleration string parameter
+// ============================================================================
+
+TEST(ConfigHelpersTest, GpuAccelerationAuto)
+{
+  YAML::Node config;
+  config["gpu_acceleration"] = "auto";
+  EXPECT_EQ(config_string(config, "gpu_acceleration", "auto"), "auto");
+}
+
+TEST(ConfigHelpersTest, GpuAccelerationGpu)
+{
+  YAML::Node config;
+  config["gpu_acceleration"] = "gpu";
+  EXPECT_EQ(config_string(config, "gpu_acceleration", "auto"), "gpu");
+}
+
+TEST(ConfigHelpersTest, GpuAccelerationCpu)
+{
+  YAML::Node config;
+  config["gpu_acceleration"] = "cpu";
+  EXPECT_EQ(config_string(config, "gpu_acceleration", "auto"), "cpu");
+}
+
+TEST(ConfigHelpersTest, GpuAccelerationMissingDefaultsToAuto)
+{
+  YAML::Node config;
+  EXPECT_EQ(config_string(config, "gpu_acceleration", "auto"), "auto");
+}
+
 // ============================================================================
 // Tests for pixel format detection utilities
 // ============================================================================
@@ -206,7 +301,7 @@ TEST(PixelFormatTest, GetPixelFormatNameReturnsUnknownForOther)
 
 TEST(ConfigHelpersTest, FullConfigParsingScenario)
 {
-  // Simulate a typical camera.yaml structure
+  // Simulate a typical camera.yaml structure matching the real camera.yaml
   std::string yaml_str = R"(
     topic: "/test_camera/images"
     pixelformat: "bgr8"
@@ -217,10 +312,15 @@ TEST(ConfigHelpersTest, FullConfigParsingScenario)
     acquisition_frame_rate_enable: true
     acquisition_frame_rate: 30.0
     watchdog_timeout_sec: 10.0
+    publish_pol_channels: false
+    publish_pol_max: true
+    publish_dolp: true
+    publish_aolp: true
+    gpu_acceleration: "cpu"
   )";
-  
+
   YAML::Node config = YAML::Load(yaml_str);
-  
+
   EXPECT_EQ(config_string(config, "topic", "/default"), "/test_camera/images");
   EXPECT_EQ(config_string(config, "pixelformat", ""), "bgr8");
   EXPECT_TRUE(config_bool(config, "publish_raw", false));
@@ -230,11 +330,28 @@ TEST(ConfigHelpersTest, FullConfigParsingScenario)
   EXPECT_TRUE(config_bool(config, "acquisition_frame_rate_enable", false));
   EXPECT_DOUBLE_EQ(config_double(config, "acquisition_frame_rate", -1.0), 30.0);
   EXPECT_DOUBLE_EQ(config_double(config, "watchdog_timeout_sec", 5.0), 10.0);
-  
+
+  // Polarization publish flags
+  EXPECT_FALSE(config_bool(config, "publish_pol_channels", true));
+  EXPECT_TRUE(config_bool(config, "publish_pol_max", false));
+  EXPECT_TRUE(config_bool(config, "publish_dolp", false));
+  EXPECT_TRUE(config_bool(config, "publish_aolp", false));
+
+  // GPU acceleration string
+  EXPECT_EQ(config_string(config, "gpu_acceleration", "auto"), "cpu");
+
   // Verify missing keys return defaults
   EXPECT_EQ(config_string(config, "serial", ""), "");
   EXPECT_DOUBLE_EQ(config_double(config, "gain", -1.0), -1.0);
   EXPECT_EQ(config_int64(config, "target_brightness", -1), -1);
+}
+
+TEST(ConfigHelpersTest, WatchdogDisabledAtZero)
+{
+  // watchdog_timeout_sec: 0.0 disables the watchdog per camera.yaml docs
+  YAML::Node config;
+  config["watchdog_timeout_sec"] = 0.0;
+  EXPECT_DOUBLE_EQ(config_double(config, "watchdog_timeout_sec", 5.0), 0.0);
 }
 
 int main(int argc, char** argv)
