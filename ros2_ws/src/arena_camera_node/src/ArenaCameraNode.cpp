@@ -1229,40 +1229,48 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
       format_logged = true;
     }
 
-    // On first frame: read PTP sync status and measure the clock offset between
-    // the camera's hardware clock and the ROS system clock. Sets m_ptp_synced_
-    // so fill_header_() can choose the right timestamp source for all subsequent frames.
-    if (!m_clock_offset_logged_) {
-      // Read PTP status from camera
-      std::string ptp_status = "unknown";
-      int64_t ptp_offset_ns = 0;
-      try {
-        auto nodemap = m_pDevice->GetNodeMap();
-        GenICam::gcstring s = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "PtpStatus");
-        ptp_status = std::string(s.c_str());
+    // Re-check PTP sync status every 5 s. First check is immediate (m_ptp_last_check_
+    // starts at epoch so the duration is always >= 5 s on the first frame).
+    // Logs on first check and whenever status changes; silent otherwise.
+    {
+      auto ptp_now = std::chrono::steady_clock::now();
+      bool first_check = (m_ptp_last_check_ == std::chrono::steady_clock::time_point{});
+      if (first_check ||
+          std::chrono::duration_cast<std::chrono::seconds>(
+              ptp_now - m_ptp_last_check_).count() >= 5) {
+        m_ptp_last_check_ = ptp_now;
+
+        std::string ptp_status = "unknown";
+        int64_t ptp_offset_ns = 0;
         try {
-          ptp_offset_ns = Arena::GetNodeValue<int64_t>(nodemap, "PtpOffsetFromMaster");
+          auto nodemap = m_pDevice->GetNodeMap();
+          GenICam::gcstring s = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "PtpStatus");
+          ptp_status = std::string(s.c_str());
+          try {
+            ptp_offset_ns = Arena::GetNodeValue<int64_t>(nodemap, "PtpOffsetFromMaster");
+          } catch (...) {}
         } catch (...) {}
-      } catch (...) {}
 
-      bool ptp_synced = (ptp_status == "Slave");
-      m_ptp_synced_.store(ptp_synced);
+        bool ptp_synced = (ptp_status == "Slave");
+        bool was_synced = m_ptp_synced_.exchange(ptp_synced);
 
-      uint64_t cam_ns    = pImage->GetTimestampNs();
-      int64_t  ros_ns    = this->now().nanoseconds();
-      int64_t  offset_ms = (ros_ns - static_cast<int64_t>(cam_ns)) / 1000000;
-
-      if (ptp_synced) {
-        log_info("PTP synchronized (Slave) — using camera hardware timestamps. "
-                 "Camera-ROS offset: " + std::to_string(offset_ms) +
-                 " ms, PtpOffsetFromMaster: " + std::to_string(ptp_offset_ns) + " ns");
-      } else {
-        log_warn("PTP NOT synchronized (PtpStatus: " + ptp_status +
-                 ") — falling back to ROS system clock. Camera-ROS offset: " +
-                 std::to_string(offset_ms) +
-                 " ms. Run ptp4l on the host for accurate timestamps.");
+        if (ptp_synced && (!was_synced || first_check)) {
+          uint64_t cam_ns   = pImage->GetTimestampNs();
+          int64_t  ros_ns   = this->now().nanoseconds();
+          int64_t  offset_ms = (ros_ns - static_cast<int64_t>(cam_ns)) / 1000000;
+          log_info("PTP synchronized (Slave) — using camera hardware timestamps. "
+                   "Camera-ROS offset: " + std::to_string(offset_ms) +
+                   " ms, PtpOffsetFromMaster: " + std::to_string(ptp_offset_ns) + " ns");
+        } else if (!ptp_synced && (was_synced || first_check)) {
+          uint64_t cam_ns   = pImage->GetTimestampNs();
+          int64_t  ros_ns   = this->now().nanoseconds();
+          int64_t  offset_ms = (ros_ns - static_cast<int64_t>(cam_ns)) / 1000000;
+          log_warn("PTP NOT synchronized (PtpStatus: " + ptp_status +
+                   ") — falling back to ROS system clock. Camera-ROS offset: " +
+                   std::to_string(offset_ms) +
+                   " ms. Run ptp4l on the host for accurate timestamps.");
+        }
       }
-      m_clock_offset_logged_ = true;
     }
 
     // --- Publish raw image if enabled ---

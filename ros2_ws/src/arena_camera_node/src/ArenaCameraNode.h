@@ -256,7 +256,8 @@ class ArenaCameraNode : public rclcpp::Node
   
   // Streaming state for proper cleanup (atomic for thread safety between destructor and deleters)
   std::atomic<bool> m_is_streaming_;
-  bool m_clock_offset_logged_{false};  // per-instance: log PTP offset only on first frame
+  // PTP re-check: epoch default triggers an immediate first check; updated every 5 s.
+  std::chrono::steady_clock::time_point m_ptp_last_check_{};
 
   // FPS / watchdog stats and processing-time aggregates — written by grab/worker threads,
   // read by ROS timer thread (produce_diagnostics_). Guarded by m_stats_mutex_.
