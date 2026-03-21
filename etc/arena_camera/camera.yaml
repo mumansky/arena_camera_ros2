@@ -28,14 +28,6 @@
     # If not set, camera_info is published with an empty (uncalibrated) calibration.
     camera_info_url: "package://arena_camera_node/calibration/lucid_fisheye.yaml"
 
-    # Timestamp Source
-    # ----------------
-    # false (default): Use ROS system clock (this->now()) for all image timestamps.
-    #   Required for correct sensor fusion with IMU, LiDAR, barometer, etc.
-    #   Use this unless PTP is explicitly configured and synchronized.
-    # true: Use camera hardware clock (GetTimestampNs()) — only valid with PTP sync.
-    use_camera_timestamp: false
-    
     # QoS Settings
     # ------------
     # Quality of Service settings for the image publisher.
