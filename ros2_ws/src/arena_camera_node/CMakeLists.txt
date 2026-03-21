@@ -53,6 +53,7 @@ find_package(camera_info_manager REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(arena_sdk REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(camera_info_manager REQUIRED)
 
 # ------------
 # EXPORT DEPS
@@ -117,6 +118,8 @@ set(target_name start)
 add_executable(${target_name}
     src/main.cpp
     src/ArenaCameraNode.cpp
+    src/camera_config.cpp
+    src/diagnostics.cpp
     src/light_arena/deviceinfo_helper.cpp
     src/rclcpp_adapter/pixelformat_translation.cpp
     src/rclcpp_adapter/quality_of_service_translation.cpp
@@ -358,6 +361,9 @@ if(BUILD_TESTING)
   # Config helper and pixel format utility tests
   ament_add_gtest(test_config_helpers
     test/test_config_helpers.cpp
+  )
+  target_include_directories(test_config_helpers PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
   target_link_libraries(test_config_helpers yaml-cpp)
 endif()

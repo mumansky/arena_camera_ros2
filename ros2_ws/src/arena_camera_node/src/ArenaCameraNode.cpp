@@ -40,6 +40,7 @@
  * Trigger mode uses blocking GetImage() in publish_an_image_on_trigger_().
  */
 
+#include <cinttypes>  // PRId64, PRIu64
 #include <cstring>    // memcpy
 #include <cmath>      // std::atan2, std::acos, std::clamp
 #include <algorithm>  // std::clamp
@@ -70,58 +71,11 @@
 // ArenaSDK
 #include "ArenaCameraNode.h"
 #include "arena_image_raii.h"
+#include "config_helpers.h"
+#include "pixel_format_helpers.h"
 #include "light_arena/deviceinfo_helper.h"
 #include "rclcpp_adapter/pixelformat_translation.h"
 #include "rclcpp_adapter/quality_of_service_translation.h"
-
-// ============================================================================
-// Pixel Format Constants
-// ============================================================================
-// These constants define the PFNC (PixelFormat Naming Convention) values used
-// by Arena SDK for different image formats. Using named constants instead of
-// magic numbers improves code readability and maintainability.
-// Note: PFNC_BGR8 is already defined as a macro in Arena SDK's PFNC.h
-
-namespace PixelFormat {
-  // PolarizedAngles_0d_45d_90d_135d_BayerRG8 format
-  // Used by polarized cameras (e.g., PHX050S1-QC) that capture 4 polarization
-  // angles (0°, 45°, 90°, 135°) in a single Bayer pattern image.
-  // Each 2x2 Bayer quad contains one pixel for each polarization angle.
-  constexpr uint64_t PFNC_POLARIZED_BAYER_RG8 = 0x8220020F;
-  // Mono8 (GenICam PFNC standard value 0x01080001): single-channel 8-bit grayscale.
-  // Named MONO8 to avoid macro name collision with ArenaSDK's PFNC_Mono8 macro.
-  constexpr uint64_t MONO8 = 0x01080001;
-}
-
-// ============================================================================
-// Helper Functions for Pixel Format Detection
-// ============================================================================
-
-/**
- * @brief Check if the given pixel format is a polarized format
- * @param format PFNC pixel format value from Arena SDK
- * @return true if the format is a polarized format, false otherwise
- */
-inline bool is_polarized_format(uint64_t format) {
-  return format == PixelFormat::PFNC_POLARIZED_BAYER_RG8;
-}
-
-/**
- * @brief Get a human-readable name for a pixel format
- * @param format PFNC pixel format value from Arena SDK
- * @return String describing the pixel format
- */
-inline std::string get_pixel_format_name(uint64_t format) {
-  if (format == PixelFormat::PFNC_POLARIZED_BAYER_RG8) {
-    return "PolarizedAngles_0d_45d_90d_135d_BayerRG8";
-  } else if (format == PFNC_BGR8) {
-    return "BGR8";
-  } else {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(format));
-    return std::string("Unknown (") + buf + ")";
-  }
-}
 
 /**
  * @brief Validate that an image has the expected BGR8 pixel format after conversion.
@@ -139,12 +93,12 @@ inline std::string get_pixel_format_name(uint64_t format) {
 inline bool validate_bgr8_format(Arena::IImage* image, const std::string& context) {
   if (!image) return false;
   uint64_t actual = image->GetPixelFormat();
-  if (actual != PFNC_BGR8) {
+  if (actual != PixelFormat::BGR8) {
     // Log as error since downstream code assumes BGR8 layout
     RCLCPP_ERROR(rclcpp::get_logger("arena_camera_node"),
         "Unexpected pixel format after conversion in %s: expected BGR8 (0x%lx), got 0x%lx. "
         "Image data may be corrupted.",
-        context.c_str(), static_cast<unsigned long>(PFNC_BGR8), static_cast<unsigned long>(actual));
+        context.c_str(), static_cast<unsigned long>(PixelFormat::BGR8), static_cast<unsigned long>(actual));
     return false;
   }
   return true;
@@ -200,121 +154,6 @@ void ArenaCameraNode::load_config_file_()
   }
 }
 
-/**
- * @brief Helper to safely read a string value from YAML config
- * @param config YAML node to read from
- * @param key Parameter key name
- * @param default_val Default value if key not found or conversion fails
- * @return The parameter value or default
- */
-static std::string config_string(const YAML::Node& config, const std::string& key, const std::string& default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<std::string>();
-    }
-  } catch (const YAML::Exception&) {
-    // Type conversion failed; fall through to default
-  }
-  return default_val;
-}
-
-/**
- * @brief Helper to safely read a bool value from YAML config
- * @param config YAML node to read from
- * @param key Parameter key name
- * @param default_val Default value if key not found or conversion fails
- * @return The parameter value or default
- */
-static bool config_bool(const YAML::Node& config, const std::string& key, bool default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<bool>();
-    }
-  } catch (const YAML::Exception&) {
-    // Type conversion failed; fall through to default
-  }
-  return default_val;
-}
-
-/**
- * @brief Helper to safely read a double value from YAML config
- * @param config YAML node to read from
- * @param key Parameter key name
- * @param default_val Default value if key not found or conversion fails
- * @return The parameter value or default
- */
-static double config_double(const YAML::Node& config, const std::string& key, double default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<double>();
-    }
-  } catch (const YAML::Exception&) {
-    // Type conversion failed; fall through to default
-  }
-  return default_val;
-}
-
-/**
- * @brief Helper to safely read an int64 value from YAML config
- * @param config YAML node to read from
- * @param key Parameter key name
- * @param default_val Default value if key not found or conversion fails
- * @return The parameter value or default
- */
-static int64_t config_int64(const YAML::Node& config, const std::string& key, int64_t default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<int64_t>();
-    }
-  } catch (const YAML::Exception&) {
-    // Type conversion failed; fall through to default
-  }
-  return default_val;
-}
-
-/**
- * @brief Helper to safely read an int value from YAML config
- * @param config YAML node to read from
- * @param key Parameter key name
- * @param default_val Default value if key not found or conversion fails
- * @return The parameter value or default
- */
-static int config_int(const YAML::Node& config, const std::string& key, int default_val)
-{
-  try {
-    if (config && config[key]) {
-      return config[key].as<int>();
-    }
-  } catch (const YAML::Exception&) {
-    // Type conversion failed; fall through to default
-  }
-  return default_val;
-}
-
-/**
- * @brief Helper to check if a key exists in YAML config
- * @return true if the key is present in the map (including if its value is YAML null).
- * @note Use config_has_value() when you also need the value to be non-null.
- */
-static bool config_has(const YAML::Node& config, const std::string& key)
-{
-  return config && config[key];
-}
-
-/**
- * @brief Helper to check if a key exists and has a non-null value in YAML config.
- * Unlike config_has(), returns false for keys whose value is YAML null (e.g. "key: ~").
- * Use this when a null value should be treated the same as a missing key.
- */
-static bool config_has_value(const YAML::Node& config, const std::string& key)
-{
-  return config && config[key] && !config[key].IsNull();
-}
-
 void ArenaCameraNode::parse_parameters_()
 {
   std::string currentParam = "";
@@ -329,8 +168,11 @@ void ArenaCameraNode::parse_parameters_()
     currentParam = "frame_id";
     frame_id_ = config_string(m_config_params_, "frame_id", "camera_optical_frame");
 
-    currentParam = "use_camera_timestamp";
-    use_camera_timestamp_ = config_bool(m_config_params_, "use_camera_timestamp", false);
+    // use_camera_timestamp_ removed — timestamping is automatic:
+    // PTP synced (PtpStatus=Slave) → camera hardware clock; otherwise → ROS clock.
+
+    currentParam = "camera_info_url";
+    camera_info_url_ = config_string(m_config_params_, "camera_info_url", "");
 
     currentParam = "serial";
     serial_ = config_string(m_config_params_, "serial", "");
@@ -564,25 +406,26 @@ void ArenaCameraNode::initialize_()
   if (is_passed_pub_qos_history_) {
     if (is_supported_qos_history_policy(pub_qos_history_)) {
       pub_qos_.history(
-          K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY[pub_qos_history_]);
+          K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY.at(pub_qos_history_));
     } else {
       throw std::invalid_argument("Unsupported QoS history policy: " + pub_qos_history_);
     }
   }
-  // QoS depth
-  if (is_passed_pub_qos_history_depth_ &&
-      K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY[pub_qos_history_] ==
-          RMW_QOS_POLICY_HISTORY_KEEP_LAST) {
-    // TODO
-    // test err msg withwhen -1
-    pub_qos_.keep_last(pub_qos_history_depth_);
+  // QoS depth — only apply if history policy is KEEP_LAST; use find() to avoid
+  // inserting into the map when pub_qos_history_ is unset (empty string).
+  if (is_passed_pub_qos_history_depth_) {
+    auto hist_it = K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY.find(pub_qos_history_);
+    if (hist_it != K_CMDLN_PARAMETER_TO_QOS_HISTORY_POLICY.end() &&
+        hist_it->second == RMW_QOS_POLICY_HISTORY_KEEP_LAST) {
+      pub_qos_.keep_last(pub_qos_history_depth_);
+    }
   }
 
   // Qos reliability
   if (is_passed_pub_qos_reliability_) {
     if (is_supported_qos_reliability_policy(pub_qos_reliability_)) {
       pub_qos_.reliability(
-          K_CMDLN_PARAMETER_TO_QOS_RELIABILITY_POLICY[pub_qos_reliability_]);
+          K_CMDLN_PARAMETER_TO_QOS_RELIABILITY_POLICY.at(pub_qos_reliability_));
     } else {
       throw std::invalid_argument("Unsupported QoS reliability policy: " + pub_qos_reliability_);
     }
@@ -1386,6 +1229,42 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
       format_logged = true;
     }
 
+    // On first frame: read PTP sync status and measure the clock offset between
+    // the camera's hardware clock and the ROS system clock. Sets m_ptp_synced_
+    // so fill_header_() can choose the right timestamp source for all subsequent frames.
+    if (!m_clock_offset_logged_) {
+      // Read PTP status from camera
+      std::string ptp_status = "unknown";
+      int64_t ptp_offset_ns = 0;
+      try {
+        auto nodemap = m_pDevice->GetNodeMap();
+        GenICam::gcstring s = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "PtpStatus");
+        ptp_status = std::string(s.c_str());
+        try {
+          ptp_offset_ns = Arena::GetNodeValue<int64_t>(nodemap, "PtpOffsetFromMaster");
+        } catch (...) {}
+      } catch (...) {}
+
+      bool ptp_synced = (ptp_status == "Slave");
+      m_ptp_synced_.store(ptp_synced);
+
+      uint64_t cam_ns    = pImage->GetTimestampNs();
+      int64_t  ros_ns    = this->now().nanoseconds();
+      int64_t  offset_ms = (ros_ns - static_cast<int64_t>(cam_ns)) / 1000000;
+
+      if (ptp_synced) {
+        log_info("PTP synchronized (Slave) — using camera hardware timestamps. "
+                 "Camera-ROS offset: " + std::to_string(offset_ms) +
+                 " ms, PtpOffsetFromMaster: " + std::to_string(ptp_offset_ns) + " ns");
+      } else {
+        log_warn("PTP NOT synchronized (PtpStatus: " + ptp_status +
+                 ") — falling back to ROS system clock. Camera-ROS offset: " +
+                 std::to_string(offset_ms) +
+                 " ms. Run ptp4l on the host for accurate timestamps.");
+      }
+      m_clock_offset_logged_ = true;
+    }
+
     // --- Publish raw image if enabled ---
     if (publish_raw_ && m_pub_) {
       auto p_image_msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -1647,6 +1526,35 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                 }
                 
                 if (tile_w > 0 && tile_h > 0) {
+                  // Build fisheye undistortion maps once from calibration
+                  if (!m_undistort_maps_ready_ && m_camera_info_manager_ &&
+                      m_camera_info_manager_->isCalibrated()) {
+                    auto ci = m_camera_info_manager_->getCameraInfo();
+                    if (ci.distortion_model == "equidistant" && ci.d.size() == 4) {
+                      cv::Mat K = (cv::Mat_<double>(3, 3) <<
+                          ci.k[0], ci.k[1], ci.k[2],
+                          ci.k[3], ci.k[4], ci.k[5],
+                          ci.k[6], ci.k[7], ci.k[8]);
+                      cv::Mat D = (cv::Mat_<double>(1, 4) <<
+                          ci.d[0], ci.d[1], ci.d[2], ci.d[3]);
+                      cv::fisheye::initUndistortRectifyMap(
+                          K, D, cv::Mat::eye(3, 3, CV_64F), K,
+                          cv::Size(tile_w, tile_h), CV_16SC2,
+                          m_undistort_map1_, m_undistort_map2_);
+                      m_undistort_maps_ready_ = true;
+                      log_info("Fisheye undistortion maps built for debug display");
+                    }
+                  }
+
+                  // Optionally remap a mat through the undistortion maps
+                  auto maybe_undistort = [&](const cv::Mat& src) -> cv::Mat {
+                    if (!m_display_undistorted_ || !m_undistort_maps_ready_ || src.empty())
+                      return src;
+                    cv::Mat dst;
+                    cv::remap(src, dst, m_undistort_map1_, m_undistort_map2_, cv::INTER_LINEAR);
+                    return dst;
+                  };
+
                   // Scale tiles down for display — target ~1920px wide for 4 columns
                   int target_tile_w = 480;
                   double scale = static_cast<double>(target_tile_w) / tile_w;
@@ -1671,15 +1579,34 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                     return display;
                   };
                   
-                  // Build tiles
-                  cv::Mat t0   = to_display_tile(display_ch[0], "0 deg");
-                  cv::Mat t45  = to_display_tile(display_ch[1], "45 deg");
-                  cv::Mat t90  = to_display_tile(display_ch[2], "90 deg");
-                  cv::Mat t135 = to_display_tile(display_ch[3], "135 deg");
-                  cv::Mat tmax = to_display_tile(display_max, "Max Combined");
-                  cv::Mat tdolp = to_display_tile(display_dolp, "DOLP");
-                  cv::Mat taolp = to_display_tile(display_aolp, "AoLP");
+                  // Build tiles (with optional fisheye undistortion)
+                  std::string undist_suffix = m_display_undistorted_ ? " [U]" : "";
+                  cv::Mat t0   = to_display_tile(maybe_undistort(display_ch[0]), "0 deg" + undist_suffix);
+                  cv::Mat t45  = to_display_tile(maybe_undistort(display_ch[1]), "45 deg" + undist_suffix);
+                  cv::Mat t90  = to_display_tile(maybe_undistort(display_ch[2]), "90 deg" + undist_suffix);
+                  cv::Mat t135 = to_display_tile(maybe_undistort(display_ch[3]), "135 deg" + undist_suffix);
+                  cv::Mat tmax = to_display_tile(maybe_undistort(display_max), "Max Combined" + undist_suffix);
+                  cv::Mat tdolp = to_display_tile(maybe_undistort(display_dolp), "DOLP" + undist_suffix);
+                  cv::Mat taolp = to_display_tile(maybe_undistort(display_aolp), "AoLP" + undist_suffix);
                   cv::Mat tblank = cv::Mat::zeros(scaled_h, scaled_w, CV_8UC3);
+                  // Snapshot thread-shared data before the overlay block
+                  double overlay_fps;
+                  {
+                    std::lock_guard<std::mutex> slock(m_stats_mutex_);
+                    overlay_fps = m_calculated_fps_;
+                  }
+                  std::string overlay_exposure, overlay_target_bright, overlay_calc_mean;
+                  {
+                    std::lock_guard<std::mutex> clock(m_diag_cache_mutex_);
+                    auto get = [&](const char* k) -> std::string {
+                      auto it = m_diag_genicam_cache_.find(k);
+                      return it != m_diag_genicam_cache_.end() ? it->second : "N/A";
+                    };
+                    overlay_exposure      = get("ExposureTime (us)");
+                    overlay_target_bright = get("TargetBrightness");
+                    overlay_calc_mean     = get("CalculatedMean");
+                  }
+
                   // Overlay diagnostics info on the info tile
                   {
                     int y = 25;
@@ -1689,25 +1616,24 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                                   cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1);
                       y += line_h;
                     };
-                    
+
                     put_line("--- Diagnostics ---", cv::Scalar(0, 255, 0));
-                    
+
                     // FPS (from live counter, not cache)
                     std::ostringstream fps_ss;
-                    fps_ss << std::fixed << std::setprecision(1) << m_calculated_fps_;
+                    fps_ss << std::fixed << std::setprecision(1) << overlay_fps;
                     put_line("FPS: " + fps_ss.str());
-                    
-                    // Look up values from diagnostics cache (O(1) map lookup)
-                    auto cache_value = [&](const std::string& key) -> std::string {
-                      auto it = m_diag_genicam_cache_.find(key);
-                      return (it != m_diag_genicam_cache_.end()) ? it->second : "N/A";
-                    };
-                    
-                    put_line("ExposureTime: " + cache_value("ExposureTime (us)") + " us");
-                    put_line("TargetBright: " + cache_value("TargetBrightness"));
-                    put_line("CalcMean: " + cache_value("CalculatedMean"));
+
+                    put_line("ExposureTime: " + overlay_exposure + " us");
+                    put_line("TargetBright: " + overlay_target_bright);
+                    put_line("CalcMean: " + overlay_calc_mean);
                     
                     y += 10;  // spacer
+                    std::string undist_status = m_undistort_maps_ready_
+                        ? (m_display_undistorted_ ? "ON" : "off")
+                        : "no cal";
+                    put_line("Undistort [u]: " + undist_status,
+                             m_display_undistorted_ ? cv::Scalar(0, 255, 100) : cv::Scalar(100, 100, 100));
                     put_line("'s' save | 'q' quit", cv::Scalar(100, 100, 100));
                   }
                   
@@ -1720,29 +1646,44 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                   cv::imshow("Polarization Debug", tiled);
                   int key = cv::waitKey(1) & 0xFF;
                   
-                  if (key == 'q' || key == 'Q') {
+                  if (key == 'u' || key == 'U') {
+                    if (m_undistort_maps_ready_) {
+                      m_display_undistorted_ = !m_display_undistorted_;
+                      log_info(std::string("Debug display undistortion ") +
+                               (m_display_undistorted_ ? "enabled" : "disabled"));
+                    } else {
+                      log_warn("No calibration loaded — undistortion unavailable");
+                    }
+                  } else if (key == 'q' || key == 'Q') {
                     display_images_active_ = false;
                     cv::destroyAllWindows();
                     cv::waitKey(1);  // flush the destroy event so the window actually closes
                     log_info("Debug display window closed by user - press Ctrl+C to fully stop the node");
                   } else if (key == 's' || key == 'S') {
-                    // Create a new session directory on each save to avoid mixing sessions
                     auto now = std::chrono::system_clock::now();
                     auto time_t_now = std::chrono::system_clock::to_time_t(now);
-                    std::ostringstream oss;
                     struct tm local_tm {};
                     localtime_r(&time_t_now, &local_tm);
-                    oss << std::put_time(&local_tm, "%Y%m%d_%H%M%S");
-                    const char* home_env = getenv("HOME");
-                    std::string home = home_env ? home_env : "/tmp";
-                    save_session_dir_ = home + "/lucid_camera_images/session_" + oss.str();
-                    std::filesystem::create_directories(save_session_dir_);
-                    
+
+                    // Create the session folder once per run (on first save)
+                    if (save_session_dir_.empty()) {
+                      std::ostringstream session_oss;
+                      session_oss << std::put_time(&local_tm, "%Y%m%d_%H%M%S");
+                      const char* home_env = getenv("HOME");
+                      std::string home = home_env ? home_env : "/tmp";
+                      save_session_dir_ = home + "/lucid_camera_images/session_" + session_oss.str();
+                      std::filesystem::create_directories(save_session_dir_);
+                    }
+
+                    // Per-save timestamp + frame ID prefix
+                    std::ostringstream ts_oss;
+                    ts_oss << std::put_time(&local_tm, "%Y%m%d_%H%M%S");
                     uint64_t frame_id = pImage->GetFrameId();
-                    std::string prefix = save_session_dir_ + "/frame_" + std::to_string(frame_id) + "_";
+                    std::string prefix = save_session_dir_ + "/" + ts_oss.str() +
+                                         "_frame_" + std::to_string(frame_id) + "_";
                     
-                    // Save full-resolution images (not thumbnails)
-                    struct SavePair { const cv::Mat& mat; std::string name; };
+                    // Save full-resolution images — always both raw and undistorted
+                    struct SavePair { cv::Mat mat; std::string name; };
                     std::vector<SavePair> to_save = {
                       {display_ch[0], "pol_0deg"}, {display_ch[1], "pol_45deg"},
                       {display_ch[2], "pol_90deg"}, {display_ch[3], "pol_135deg"},
@@ -1753,6 +1694,13 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                       if (!sp.mat.empty()) {
                         cv::imwrite(prefix + sp.name + ".png", sp.mat);
                         saved++;
+                        if (m_undistort_maps_ready_) {
+                          cv::Mat undist;
+                          cv::remap(sp.mat, undist, m_undistort_map1_, m_undistort_map2_,
+                                    cv::INTER_LINEAR);
+                          cv::imwrite(prefix + sp.name + "_undist.png", undist);
+                          saved++;
+                        }
                       }
                     }
                     log_info("Saved " + std::to_string(saved) + " images to " + save_session_dir_ +
@@ -1774,15 +1722,19 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
       log_warn("Unknown exception extracting polarization channels");
     }
 
-    // Processing time metrics
-    auto processing_end = std::chrono::steady_clock::now();
-    m_last_processing_time_ms_ = std::chrono::duration<double, std::milli>(
-        processing_end - processing_start).count();
-    if (m_last_processing_time_ms_ > m_max_processing_time_ms_) {
-      m_max_processing_time_ms_ = m_last_processing_time_ms_;
+    // Processing time metrics — guard with m_stats_mutex_ (read by diagnostics timer thread)
+    {
+      auto processing_end = std::chrono::steady_clock::now();
+      double elapsed_ms = std::chrono::duration<double, std::milli>(
+          processing_end - processing_start).count();
+      std::lock_guard<std::mutex> slock(m_stats_mutex_);
+      m_last_processing_time_ms_ = elapsed_ms;
+      if (elapsed_ms > m_max_processing_time_ms_) {
+        m_max_processing_time_ms_ = elapsed_ms;
+      }
+      m_total_processing_time_ms_ += elapsed_ms;
+      m_processing_time_samples_++;
     }
-    m_total_processing_time_ms_ += m_last_processing_time_ms_;
-    m_processing_time_samples_++;
 
   } catch (GenICam::GenericException& e) {
     m_image_publish_errors_++;
@@ -1883,13 +1835,16 @@ void ArenaCameraNode::handle_camera_image_(Arena::IImage* pImage)
 
 void ArenaCameraNode::fill_header_(std_msgs::msg::Header& header, Arena::IImage* pImage)
 {
-  if (use_camera_timestamp_) {
-    // Use camera hardware/PTP clock. Only valid when PTP is synchronized.
+  if (m_ptp_synced_.load()) {
+    // PTP synchronized: camera clock tracks wall time — use hardware timestamp
+    // for accurate exposure-time alignment with IMU/LiDAR.
     uint64_t ts_ns = pImage->GetTimestampNs();
-    header.stamp.sec    = static_cast<int32_t>(ts_ns / 1000000000ULL);
+    header.stamp.sec     = static_cast<int32_t>(ts_ns / 1000000000ULL);
     header.stamp.nanosec = static_cast<uint32_t>(ts_ns % 1000000000ULL);
   } else {
-    // Default: ROS system clock — required for sensor fusion with IMU/LiDAR.
+    // No PTP: fall back to ROS system clock at processing time.
+    // This has ~2-15 ms jitter vs true exposure time but is at least
+    // in the correct time domain for downstream consumers.
     header.stamp = this->now();
   }
   header.frame_id = frame_id_;

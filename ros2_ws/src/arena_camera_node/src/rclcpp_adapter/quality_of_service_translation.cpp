@@ -1,3 +1,4 @@
+#pragma once
 
 #include "quality_of_service_translation.h"
 

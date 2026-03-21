@@ -21,6 +21,13 @@
     # For drone sensor fusion, this must match the frame defined in your URDF/TF tree.
     frame_id: "camera_optical_frame"
 
+    # Camera Calibration
+    # ------------------
+    # Path to intrinsic calibration YAML produced by camera_calibration / cameracalibrator.py.
+    # Published on <topic>/camera_info alongside every image.
+    # If not set, camera_info is published with an empty (uncalibrated) calibration.
+    camera_info_url: "file:///home/mark/Documents/git/arena_camera_ros2/etc/arena_camera/lucid_fisheye.yaml"
+
     # Timestamp Source
     # ----------------
     # false (default): Use ROS system clock (this->now()) for all image timestamps.
@@ -138,7 +145,7 @@
     # Image Publishing Options
     # ------------------------
     # Control which image formats to publish
-    publish_raw: false       # Publish raw uncompressed images (sensor_msgs/Image)
+    publish_raw: true        # Publish raw uncompressed images (sensor_msgs/Image)
     publish_compressed: true  # Publish JPEG compressed images (sensor_msgs/CompressedImage)
     # Note: You can enable both to publish raw and compressed simultaneously
     # Compressed images are published to <topic>/compressed

@@ -60,9 +60,6 @@ class ArenaCameraNode : public rclcpp::Node
   
  public:
   ArenaCameraNode() : Node("arena_camera_node"),
-    m_images_published_(0),
-    m_image_publish_errors_(0),
-    m_incomplete_frames_(0),
     m_device_connected_(false),
     m_is_streaming_(false)
   {
@@ -204,6 +201,8 @@ class ArenaCameraNode : public rclcpp::Node
 
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_compressed_;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr m_camera_info_pub_;
+  std::shared_ptr<camera_info_manager::CameraInfoManager> m_camera_info_manager_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_pol_0deg_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr m_pub_pol_0deg_compressed_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_pol_45deg_;
@@ -252,27 +251,28 @@ class ArenaCameraNode : public rclcpp::Node
 
   // Diagnostics
   std::unique_ptr<diagnostic_updater::Updater> m_diagnostic_updater_;
-  uint64_t m_images_published_;
-  uint64_t m_image_publish_errors_;
-  uint64_t m_incomplete_frames_;   // GigE frames with missing packets (IsIncomplete)
+  std::atomic<uint64_t> m_images_published_{0};
+  std::atomic<uint64_t> m_image_publish_errors_{0};
+  std::atomic<uint64_t> m_incomplete_frames_{0};  // GigE frames with missing packets (IsIncomplete)
   bool m_device_connected_;
   
   // Streaming state for proper cleanup (atomic for thread safety between destructor and deleters)
   std::atomic<bool> m_is_streaming_;
+  bool m_clock_offset_logged_{false};  // per-instance: log PTP offset only on first frame
 
-  // FPS / watchdog stats — written by grab thread (handle_camera_image_),
+  // FPS / watchdog stats and processing-time aggregates — written by grab/worker threads,
   // read by ROS timer thread (produce_diagnostics_). Guarded by m_stats_mutex_.
   mutable std::mutex m_stats_mutex_;
   std::chrono::steady_clock::time_point m_fps_last_time_;
   uint64_t m_fps_frame_count_;
   double m_calculated_fps_;
-
-  // Backpressure monitoring (Task 4)
-  uint64_t m_backpressure_events_{0};            // Count of skipped frames due to backpressure
   double m_last_processing_time_ms_{0.0};        // Last frame processing time in ms
   double m_max_processing_time_ms_{0.0};         // Max processing time observed
   double m_total_processing_time_ms_{0.0};       // Sum of processing times for average calculation
   uint64_t m_processing_time_samples_{0};        // Number of processing time samples
+
+  // Simple increment-only counters — atomic so diagnostics can read without holding m_stats_mutex_
+  std::atomic<uint64_t> m_backpressure_events_{0};  // Frames dropped due to backpressure
 
   std::string serial_;
   bool is_passed_serial_;
@@ -281,7 +281,8 @@ class ArenaCameraNode : public rclcpp::Node
   bool is_passed_topic_;
 
   std::string frame_id_;              // TF coordinate frame name for all published images
-  bool use_camera_timestamp_;         // true = camera hardware clock; false = ROS clock (default)
+  std::string camera_info_url_;       // file:// URL to calibration YAML (empty = uncalibrated)
+  std::atomic<bool> m_ptp_synced_{false}; // true when camera PtpStatus == "Slave"
 
   size_t width_;
   bool is_passed_width;
@@ -374,6 +375,9 @@ class ArenaCameraNode : public rclcpp::Node
   bool display_images_;               // Config: show tiled debug window
   std::atomic<bool> display_images_active_{false}; // Runtime: toggled off by 'q' keypress (atomic for thread safety)
   std::string save_session_dir_;      // Created on first 's' keypress
+  bool m_display_undistorted_{false}; // 'u' toggle: apply fisheye undistortion to display tiles
+  bool m_undistort_maps_ready_{false};
+  cv::Mat m_undistort_map1_, m_undistort_map2_;
   
   int jpeg_quality_;  // JPEG compression quality (1-100, default 80)
   bool profile_processing_;  // Log per-frame timing breakdown for each processing stage
@@ -394,8 +398,13 @@ class ArenaCameraNode : public rclcpp::Node
   bool m_watchdog_initialized_{false};  // Whether we've received at least one frame
   bool m_camera_frozen_{false};  // Whether the camera is currently detected as frozen
 
-  // Diagnostics GenICam read cache — rate-limited to avoid stalling GigE stream
+  // Diagnostics GenICam read cache — rate-limited to avoid stalling GigE stream.
+  // m_diag_genicam_cache_ is written by the diagnostics timer thread and read by the
+  // worker thread (debug overlay). Guard all map accesses with m_diag_cache_mutex_.
+  // m_diag_genicam_cache_valid_ and m_last_diag_genicam_read_time_ are only ever
+  // accessed from the diagnostics timer thread and do NOT need the mutex.
   static constexpr double DIAG_GENICAM_READ_INTERVAL_SEC = 10.0;
+  mutable std::mutex m_diag_cache_mutex_;
   std::chrono::steady_clock::time_point m_last_diag_genicam_read_time_{};
   bool m_diag_genicam_cache_valid_{false};
   std::map<std::string, std::string> m_diag_genicam_cache_;
@@ -430,8 +439,8 @@ class ArenaCameraNode : public rclcpp::Node
                        sensor_msgs::msg::Image& image_msg);
 
   // Fill a ROS message header with timestamp and frame_id.
-  // Uses ROS clock (this->now()) unless use_camera_timestamp_ is true, in which
-  // case the camera's hardware/PTP timestamp (pImage->GetTimestampNs()) is used.
+  // Uses this->now() (ROS clock) by default. When m_ptp_synced_ is true (camera
+  // is a PTP slave), uses the camera hardware timestamp from pImage->GetTimestampNs().
   void fill_header_(std_msgs::msg::Header& header, Arena::IImage* pImage);
 
   // Diagnostics
