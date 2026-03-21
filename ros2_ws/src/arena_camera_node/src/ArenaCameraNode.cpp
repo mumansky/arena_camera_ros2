@@ -1139,6 +1139,24 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                   cv::Mat tdolp = to_display_tile(maybe_undistort(display_dolp), "DOLP" + undist_suffix);
                   cv::Mat taolp = to_display_tile(maybe_undistort(display_aolp), "AoLP" + undist_suffix);
                   cv::Mat tblank = cv::Mat::zeros(scaled_h, scaled_w, CV_8UC3);
+                  // Snapshot thread-shared data before the overlay block
+                  double overlay_fps;
+                  {
+                    std::lock_guard<std::mutex> slock(m_stats_mutex_);
+                    overlay_fps = m_calculated_fps_;
+                  }
+                  std::string overlay_exposure, overlay_target_bright, overlay_calc_mean;
+                  {
+                    std::lock_guard<std::mutex> clock(m_diag_cache_mutex_);
+                    auto get = [&](const char* k) -> std::string {
+                      auto it = m_diag_genicam_cache_.find(k);
+                      return it != m_diag_genicam_cache_.end() ? it->second : "N/A";
+                    };
+                    overlay_exposure      = get("ExposureTime (us)");
+                    overlay_target_bright = get("TargetBrightness");
+                    overlay_calc_mean     = get("CalculatedMean");
+                  }
+
                   // Overlay diagnostics info on the info tile
                   {
                     int y = 25;
@@ -1148,23 +1166,17 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
                                   cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1);
                       y += line_h;
                     };
-                    
+
                     put_line("--- Diagnostics ---", cv::Scalar(0, 255, 0));
-                    
+
                     // FPS (from live counter, not cache)
                     std::ostringstream fps_ss;
-                    fps_ss << std::fixed << std::setprecision(1) << m_calculated_fps_;
+                    fps_ss << std::fixed << std::setprecision(1) << overlay_fps;
                     put_line("FPS: " + fps_ss.str());
-                    
-                    // Look up values from diagnostics cache (O(1) map lookup)
-                    auto cache_value = [&](const std::string& key) -> std::string {
-                      auto it = m_diag_genicam_cache_.find(key);
-                      return (it != m_diag_genicam_cache_.end()) ? it->second : "N/A";
-                    };
-                    
-                    put_line("ExposureTime: " + cache_value("ExposureTime (us)") + " us");
-                    put_line("TargetBright: " + cache_value("TargetBrightness"));
-                    put_line("CalcMean: " + cache_value("CalculatedMean"));
+
+                    put_line("ExposureTime: " + overlay_exposure + " us");
+                    put_line("TargetBright: " + overlay_target_bright);
+                    put_line("CalcMean: " + overlay_calc_mean);
                     
                     y += 10;  // spacer
                     std::string undist_status = m_undistort_maps_ready_
@@ -1260,15 +1272,19 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
       log_warn("Unknown exception extracting polarization channels");
     }
 
-    // Processing time metrics
-    auto processing_end = std::chrono::steady_clock::now();
-    m_last_processing_time_ms_ = std::chrono::duration<double, std::milli>(
-        processing_end - processing_start).count();
-    if (m_last_processing_time_ms_ > m_max_processing_time_ms_) {
-      m_max_processing_time_ms_ = m_last_processing_time_ms_;
+    // Processing time metrics — guard with m_stats_mutex_ (read by diagnostics timer thread)
+    {
+      auto processing_end = std::chrono::steady_clock::now();
+      double elapsed_ms = std::chrono::duration<double, std::milli>(
+          processing_end - processing_start).count();
+      std::lock_guard<std::mutex> slock(m_stats_mutex_);
+      m_last_processing_time_ms_ = elapsed_ms;
+      if (elapsed_ms > m_max_processing_time_ms_) {
+        m_max_processing_time_ms_ = elapsed_ms;
+      }
+      m_total_processing_time_ms_ += elapsed_ms;
+      m_processing_time_samples_++;
     }
-    m_total_processing_time_ms_ += m_last_processing_time_ms_;
-    m_processing_time_samples_++;
 
   } catch (GenICam::GenericException& e) {
     m_image_publish_errors_++;

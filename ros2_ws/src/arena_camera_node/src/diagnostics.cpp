@@ -9,6 +9,7 @@
  */
 
 #include <chrono>
+#include <map>
 #include <mutex>
 #include <string>
 
@@ -18,15 +19,21 @@
 
 void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusWrapper& stat)
 {
-  // Take a snapshot of stats under the mutex to avoid data races with the grab thread.
+  // Take a snapshot of stats under the mutex to avoid data races with the grab/worker threads.
   double calculated_fps;
+  double last_processing_time_ms, max_processing_time_ms, total_processing_time_ms;
+  uint64_t processing_time_samples;
   bool watchdog_initialized, camera_frozen, just_froze = false;
   double elapsed_since_last_frame = 0.0;
   {
     std::lock_guard<std::mutex> slock(m_stats_mutex_);
-    calculated_fps       = m_calculated_fps_;
-    watchdog_initialized = m_watchdog_initialized_;
-    camera_frozen        = m_camera_frozen_;
+    calculated_fps            = m_calculated_fps_;
+    watchdog_initialized      = m_watchdog_initialized_;
+    camera_frozen             = m_camera_frozen_;
+    last_processing_time_ms   = m_last_processing_time_ms_;
+    max_processing_time_ms    = m_max_processing_time_ms_;
+    total_processing_time_ms  = m_total_processing_time_ms_;
+    processing_time_samples   = m_processing_time_samples_;
 
     if (watchdog_initialized) {
       auto now = std::chrono::steady_clock::now();
@@ -42,29 +49,35 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
     }
   }
 
+  // Snapshot atomic counters (no mutex needed — atomics are safe to read directly)
+  uint64_t images_published    = m_images_published_.load();
+  uint64_t image_publish_errors = m_image_publish_errors_.load();
+  uint64_t backpressure_events = m_backpressure_events_.load();
+  uint64_t incomplete_frames   = m_incomplete_frames_.load();
+
   // Log outside the lock (log calls can be slow)
   if (just_froze) {
     log_err("Watchdog: Camera appears frozen - no new frames for " +
             std::to_string(elapsed_since_last_frame) + "s (timeout: " +
             std::to_string(watchdog_timeout_sec_) + "s). Last frame " +
-            std::to_string(m_images_published_) + " published.");
+            std::to_string(images_published) + " published.");
   }
 
   if (m_device_connected_) {
     if (camera_frozen) {
       stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR,
                    "Camera frozen - no new frames received");
-    } else if (m_image_publish_errors_ > 0 || m_backpressure_events_ > 0 || m_incomplete_frames_ > 0) {
+    } else if (image_publish_errors > 0 || backpressure_events > 0 || incomplete_frames > 0) {
       std::string warn_msg = "Camera connected with";
-      if (m_image_publish_errors_ > 0) {
+      if (image_publish_errors > 0) {
         warn_msg += " errors";
       }
-      if (m_backpressure_events_ > 0) {
-        if (m_image_publish_errors_ > 0) warn_msg += " and";
+      if (backpressure_events > 0) {
+        if (image_publish_errors > 0) warn_msg += " and";
         warn_msg += " backpressure";
       }
-      if (m_incomplete_frames_ > 0) {
-        if (m_image_publish_errors_ > 0 || m_backpressure_events_ > 0) warn_msg += " and";
+      if (incomplete_frames > 0) {
+        if (image_publish_errors > 0 || backpressure_events > 0) warn_msg += " and";
         warn_msg += " incomplete frames";
       }
       stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, warn_msg);
@@ -78,24 +91,24 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
   }
 
   stat.add("Device Connected", m_device_connected_ ? "true" : "false");
-  stat.add("Images Published", std::to_string(m_images_published_));
-  stat.add("Publish Errors", std::to_string(m_image_publish_errors_));
-  stat.add("Incomplete Frames", std::to_string(m_incomplete_frames_));
+  stat.add("Images Published", std::to_string(images_published));
+  stat.add("Publish Errors", std::to_string(image_publish_errors));
+  stat.add("Incomplete Frames", std::to_string(incomplete_frames));
   stat.add("Calculated FPS", std::to_string(calculated_fps));
   stat.add("Trigger Mode", trigger_mode_activated_ ? "enabled" : "disabled");
   stat.add("Topic", topic_);
 
-  // Backpressure metrics (Task 4)
-  stat.add("Backpressure Events", std::to_string(m_backpressure_events_));
-  stat.add("Last Processing Time (ms)", std::to_string(m_last_processing_time_ms_));
-  stat.add("Max Processing Time (ms)", std::to_string(m_max_processing_time_ms_));
-  if (m_processing_time_samples_ > 0) {
-    double avg_processing_time = m_total_processing_time_ms_ / m_processing_time_samples_;
+  // Backpressure metrics
+  stat.add("Backpressure Events", std::to_string(backpressure_events));
+  stat.add("Last Processing Time (ms)", std::to_string(last_processing_time_ms));
+  stat.add("Max Processing Time (ms)", std::to_string(max_processing_time_ms));
+  if (processing_time_samples > 0) {
+    double avg_processing_time = total_processing_time_ms / processing_time_samples;
     stat.add("Avg Processing Time (ms)", std::to_string(avg_processing_time));
   } else {
     stat.add("Avg Processing Time (ms)", "N/A");
   }
-  stat.add("Processing Time Samples", std::to_string(m_processing_time_samples_));
+  stat.add("Processing Time Samples", std::to_string(processing_time_samples));
 
   // Watchdog metrics
   stat.add("Camera Frozen", camera_frozen ? "true" : "false");
@@ -114,19 +127,23 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
 
     // Rate-limited GenICam register reads — only every DIAG_GENICAM_READ_INTERVAL_SEC
     // to avoid competing with GigE Vision streaming for register access.
+    // m_diag_genicam_cache_valid_ and m_last_diag_genicam_read_time_ are only accessed
+    // from this (diagnostics timer) thread, so no mutex is needed for them.
+    // The map m_diag_genicam_cache_ is shared with the worker thread overlay; we build
+    // into a local new_cache then swap under m_diag_cache_mutex_.
     auto now_diag = std::chrono::steady_clock::now();
     double diag_elapsed = m_diag_genicam_cache_valid_
         ? std::chrono::duration<double>(now_diag - m_last_diag_genicam_read_time_).count()
         : DIAG_GENICAM_READ_INTERVAL_SEC + 1.0;  // force first read
 
     if (diag_elapsed >= DIAG_GENICAM_READ_INTERVAL_SEC) {
-      m_diag_genicam_cache_.clear();
+      std::map<std::string, std::string> new_cache;
       try {
         auto nodemap = m_pDevice->GetNodeMap();
 
-        // Helper: attempt a read, cache on success, silently skip on failure
+        // Helper: attempt a read, store on success, silently skip on failure
         auto try_read = [&](const char* diag_key, auto reader) {
-          try { m_diag_genicam_cache_[diag_key] = reader(nodemap); } catch (...) {}
+          try { new_cache[diag_key] = reader(nodemap); } catch (...) {}
         };
 
         // Frame rate
@@ -177,12 +194,12 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
           if (synced) {
             int64_t offset_ns = 0;
             try { offset_ns = Arena::GetNodeValue<int64_t>(nodemap, "PtpOffsetFromMaster"); } catch (...) {}
-            m_diag_genicam_cache_["PTP"] = "Synchronized (offset: " + std::to_string(offset_ns) + " ns)";
+            new_cache["PTP"] = "Synchronized (offset: " + std::to_string(offset_ns) + " ns)";
           } else {
-            m_diag_genicam_cache_["PTP"] = "NOT synchronized (status: " + status + ")";
+            new_cache["PTP"] = "NOT synchronized (status: " + status + ")";
           }
         } catch (...) {
-          m_diag_genicam_cache_["PTP"] = "unavailable";
+          new_cache["PTP"] = "unavailable";
         }
 
         // Misc
@@ -198,22 +215,33 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
         m_diag_genicam_cache_valid_ = true;
 
       } catch (GenICam::GenericException& e) {
-        m_diag_genicam_cache_["Camera Parameters"] = std::string("GenICam error: ") + e.what();
+        new_cache["Camera Parameters"] = std::string("GenICam error: ") + e.what();
         m_diag_genicam_cache_valid_ = true;
         m_last_diag_genicam_read_time_ = now_diag;
       } catch (const std::exception& e) {
-        m_diag_genicam_cache_["Camera Parameters"] = std::string("error: ") + e.what();
+        new_cache["Camera Parameters"] = std::string("error: ") + e.what();
         m_diag_genicam_cache_valid_ = true;
         m_last_diag_genicam_read_time_ = now_diag;
       } catch (...) {
-        m_diag_genicam_cache_["Camera Parameters"] = "unknown error reading camera parameters";
+        new_cache["Camera Parameters"] = "unknown error reading camera parameters";
         m_diag_genicam_cache_valid_ = true;
         m_last_diag_genicam_read_time_ = now_diag;
       }
+
+      // Atomically swap the completed cache so the overlay thread sees a consistent map
+      {
+        std::lock_guard<std::mutex> clock(m_diag_cache_mutex_);
+        m_diag_genicam_cache_ = std::move(new_cache);
+      }
     }
 
-    // Report cached values
-    for (const auto& kv : m_diag_genicam_cache_) {
+    // Report cached values — snapshot under mutex so we don't race with the overlay reader
+    std::map<std::string, std::string> cache_snapshot;
+    {
+      std::lock_guard<std::mutex> clock(m_diag_cache_mutex_);
+      cache_snapshot = m_diag_genicam_cache_;
+    }
+    for (const auto& kv : cache_snapshot) {
       stat.add(kv.first, kv.second);
     }
     if (m_diag_genicam_cache_valid_) {

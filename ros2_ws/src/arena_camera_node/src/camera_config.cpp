@@ -569,7 +569,7 @@ void ArenaCameraNode::set_nodes_trigger_mode_()
     if (trigger_mode_activated_) {
       if (exposure_time_ < 0) {
         log_warn(
-            "\tavoid long waits wating for triggered images by providing proper "
+            "\tavoid long waits waiting for triggered images by providing proper "
             "exposure_time.");
       }
       // Enable trigger mode before setting the source and selector
