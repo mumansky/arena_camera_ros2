@@ -1,6 +1,6 @@
 image_width: 1224
 image_height: 1024
-camera_name: arena_camera
+camera_name: arena_camera_node
 camera_matrix:
   rows: 3
   cols: 3
