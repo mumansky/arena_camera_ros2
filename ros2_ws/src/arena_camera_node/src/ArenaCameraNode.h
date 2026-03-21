@@ -3,13 +3,6 @@
 #include <type_traits>
 #include <yaml-cpp/yaml.h>
 
-// TODO
-// - remove m_ before private members
-// - add const to member functions
-// fix includes in all files
-// - should we rclcpp::shutdown in construction instead
-//
-
 // std
 #include <atomic>              // std::atomic for thread-safe flags (streaming state, backpressure)
 #include <chrono>              // chrono_literals

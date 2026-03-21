@@ -54,15 +54,8 @@ Four GTest suites: `test_pixelformat_translation`, `test_qos_translation`, `test
 | `etc/arena_camera/camera.yaml` | All runtime parameters (single source of truth) |
 | `ros2_ws/src/arena_camera_node/CMakeLists.txt` | Build config — do not move `cmake/` helper |
 
-## Known Bugs (confirmed, not yet fixed)
-Most bugs from the original code review were fixed in commit `d578af3`. Remaining known issues:
-
-| Area | Bug | Fix |
-|------|-----|-----|
-| PTP timestamps | `use_camera_timestamp` in `camera.yaml` defaults to `false` but PTP refactor (`ccc38b6`) now uses `m_ptp_synced_` for timestamp selection — the yaml param may no longer take effect | Audit `fill_header_()` vs yaml param wiring |
-
 ## Important Patterns
-- **Sensor fusion timestamps**: `fill_header_()` uses `this->now()` by default; switches to camera hardware timestamp when `m_ptp_synced_` is true (camera is a PTP slave). The `use_camera_timestamp: false` default in `camera.yaml` is intentional for IMU fusion.
+- **Sensor fusion timestamps**: `fill_header_()` uses `this->now()` by default; switches to camera hardware timestamp when `m_ptp_synced_` is true (camera is a PTP slave, detected via periodic 5s PTP status poll). This is intentional for IMU/LiDAR sensor fusion.
 - **frame_id**: Must be a TF frame name (e.g., `"camera_optical_frame"`), not the integer frame counter.
 - **Polarization channels**: 4 channels at 0°, 45°, 90°, 135°. DOLP and AoLP derived from Stokes parameters.
 - **Pixel format code**: `0x8220020F` = polarized format, `0x02180015` = BayerRG8.
@@ -80,7 +73,7 @@ Most bugs from the original code review were fixed in commit `d578af3`. Remainin
 - Docker entrypoint: `arena_camera_ros_entrypoint.sh` — preserve `LD_LIBRARY_PATH` manipulation when editing.
 
 ## Reference Docs
-- `ENGINEERING_TASKS.md` — 35 prioritized engineering tasks (bugs, SDK compliance, features)
-- `CODE_REVIEW.md` — detailed code review findings
 - `ros2_ws/src/arena_camera_node/doc/FRAME_RATE_CONFIGURATION.md` — frame rate / MTU tuning guide
 - `docs/orin-deployment.md` — NVIDIA Orin deployment notes
+- `docs/archive/ENGINEERING_TASKS.md` — archived engineering task list (mostly completed)
+- `docs/archive/CODE_REVIEW.md` — archived code review (findings applied)
