@@ -142,39 +142,6 @@ TEST(ConfigHelpersTest, ConfigIntReturnsDefaultWhenMissing)
 }
 
 // ============================================================================
-// Tests for config_has
-// ============================================================================
-
-TEST(ConfigHelpersTest, ConfigHasReturnsTrueWhenPresent)
-{
-  YAML::Node config;
-  config["key"] = "value";
-  EXPECT_TRUE(config_has(config, "key"));
-}
-
-TEST(ConfigHelpersTest, ConfigHasReturnsFalseWhenMissing)
-{
-  YAML::Node config;
-  config["other"] = "value";
-  EXPECT_FALSE(config_has(config, "key"));
-}
-
-TEST(ConfigHelpersTest, ConfigHasReturnsFalseOnNullNode)
-{
-  YAML::Node config;
-  EXPECT_FALSE(config_has(config, "key"));
-}
-
-TEST(ConfigHelpersTest, ConfigHasReturnsTrueOnExplicitlyNullValue)
-{
-  // yaml-cpp: a key with a null value (e.g. "key: ~") still exists in the map,
-  // so config_has returns true. Note: yaml-cpp converts null to the string "null"
-  // rather than throwing, so config_string will NOT fall back to the default.
-  YAML::Node config = YAML::Load("key: ~");
-  EXPECT_TRUE(config_has(config, "key"));
-}
-
-// ============================================================================
 // Tests for config_has_value (key present AND non-null)
 // ============================================================================
 
@@ -193,7 +160,7 @@ TEST(ConfigHelpersTest, ConfigHasValueReturnsFalseWhenMissing)
 
 TEST(ConfigHelpersTest, ConfigHasValueReturnsFalseOnExplicitlyNullValue)
 {
-  // Unlike config_has, a null value (key: ~) is treated as absent.
+  // A key present but explicitly null (key: ~) is treated as absent.
   YAML::Node config = YAML::Load("key: ~");
   EXPECT_FALSE(config_has_value(config, "key"));
 }

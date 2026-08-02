@@ -8,7 +8,7 @@ Event-driven, two-thread design:
 1. **ArenaSDK grab thread** → `handle_camera_image_()` (fast: deep-copy image, post to mailbox, return)
 2. **Worker thread** → `process_copied_image_()` (heavy: polarization processing, publish, diagnostics)
 
-Single-slot mailbox with drop-on-backpressure between threads. There is also `publish_images_()` (~260 lines) which is **dead code** — never called in the callback architecture, do not resurrect it.
+Single-slot mailbox with drop-on-backpressure between threads.
 
 ## Build / Test / Run
 
@@ -30,7 +30,7 @@ ros2 run arena_camera_node start --ros-args --params-file etc/arena_camera/camer
 ros2 run arena_camera_node trigger_image
 ```
 
-Four GTest suites: `test_pixelformat_translation`, `test_qos_translation`, `test_arena_image_raii`, `test_config_helpers`.
+Three GTest suites: `test_pixelformat_translation`, `test_qos_translation`, `test_config_helpers`.
 
 ## Code Conventions
 - **Formatting**: `clang-format` with `.clang-format` at repo root (Google style, 2-space indent). Run `clang-format -i <file>` before committing.
@@ -38,7 +38,8 @@ Four GTest suites: `test_pixelformat_translation`, `test_qos_translation`, `test
 - **Parameters**: `declare_parameter<T>()` / `get_parameter()`. Presence flags follow the `is_passed_*` naming pattern. Update `parse_parameters_()` when adding parameters.
 - **QoS & pixel format mappings**: live in `rclcpp_adapter/` — use those, don't invent new ones.
 - **Device ownership**: Arena System and device use `shared_ptr` with custom deleters. Be careful with ownership when refactoring.
-- **RAII**: `arena_image_raii.h` provides `ArenaImagePtr` / `ArenaImageVector` — use these for Arena image lifetime management.
+- **RAII**: `arena_image_raii.h` provides `ArenaImagePtr` (a `unique_ptr` alias) and `own_arena_images()` for the vector returned by `SplitChannels` — use these for Arena image lifetime management.
+- **GenICam enums**: set them via `set_enum_node_()` — it checks writability, validates the value against the camera's entries, and logs the supported list on mismatch.
 
 ## Key Files
 | Path | Purpose |

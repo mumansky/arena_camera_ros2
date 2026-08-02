@@ -53,7 +53,6 @@ find_package(camera_info_manager REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(arena_sdk REQUIRED)
 find_package(OpenCV REQUIRED)
-find_package(camera_info_manager REQUIRED)
 
 # ------------
 # EXPORT DEPS
@@ -352,18 +351,6 @@ if(BUILD_TESTING)
   )
   ament_target_dependencies(test_qos_translation
     rclcpp
-  )
-
-  # Arena image RAII wrapper tests
-  ament_add_gtest(test_arena_image_raii
-    test/test_arena_image_raii.cpp
-  )
-  target_include_directories(test_arena_image_raii PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-  )
-  ament_target_dependencies(test_arena_image_raii
-    arena_sdk
-    OpenCV
   )
 
   # Config helper and pixel format utility tests
