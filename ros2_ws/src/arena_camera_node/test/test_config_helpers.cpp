@@ -160,7 +160,7 @@ TEST(ConfigHelpersTest, ConfigHasValueReturnsFalseWhenMissing)
 
 TEST(ConfigHelpersTest, ConfigHasValueReturnsFalseOnExplicitlyNullValue)
 {
-  // Unlike config_has, a null value (key: ~) is treated as absent.
+  // A key present but explicitly null (key: ~) is treated as absent.
   YAML::Node config = YAML::Load("key: ~");
   EXPECT_FALSE(config_has_value(config, "key"));
 }
