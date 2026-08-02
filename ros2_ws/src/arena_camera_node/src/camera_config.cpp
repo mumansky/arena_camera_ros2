@@ -36,7 +36,9 @@ bool ArenaCameraNode::set_enum_node_(GenApi::INodeMap* nodemap, const char* node
     Arena::SetNodeValue<GenICam::gcstring>(nodemap, node_name, value.c_str());
     log_info(std::string("\t") + node_name + " set to " + value);
     return true;
-  } catch (GenICam::GenericException& e) {
+  } catch (std::exception& e) {
+    // Covers GenICam::GenericException, which derives from std::exception.
+    // Config failures are non-fatal here: warn and let the caller carry on.
     log_warn(std::string("\tFailed to set ") + node_name + ": " + e.what());
     return false;
   }
