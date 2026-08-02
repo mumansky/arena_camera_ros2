@@ -419,6 +419,11 @@ class ArenaCameraNode : public rclcpp::Node
   // TODO :
   // - handle misconfigured device
   Arena::IDevice* create_device_ros_();
+  // Set a GenICam enumeration node after checking it is writable and that the
+  // camera actually offers `value`. Logs the supported entries on mismatch.
+  // Returns true only when the value was applied.
+  bool set_enum_node_(GenApi::INodeMap* nodemap, const char* node_name,
+                      const std::string& value);
   void set_nodes_();
   void set_nodes_load_default_profile_();
   void set_nodes_roi_();
@@ -427,7 +432,6 @@ class ArenaCameraNode : public rclcpp::Node
   void set_nodes_exposure_();
   void set_nodes_frame_rate_();
   void set_nodes_trigger_mode_();
-  void set_nodes_test_pattern_image_();
   void publish_an_image_on_trigger_(
       std::shared_ptr<std_srvs::srv::Trigger::Request> request,
       std::shared_ptr<std_srvs::srv::Trigger::Response> response);

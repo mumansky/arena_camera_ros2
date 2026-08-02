@@ -14,6 +14,34 @@
 #include "ArenaCameraNode.h"
 #include "rclcpp_adapter/pixelformat_translation.h"
 
+bool ArenaCameraNode::set_enum_node_(GenApi::INodeMap* nodemap, const char* node_name,
+                                     const std::string& value)
+{
+  try {
+    GenApi::CEnumerationPtr node = nodemap->GetNode(node_name);
+    if (!node || !GenApi::IsWritable(node)) {
+      log_warn(std::string("\t") + node_name + " node not writable");
+      return false;
+    }
+    if (!node->GetEntryByName(value.c_str())) {
+      log_warn(std::string("\t") + node_name + " value '" + value +
+               "' not supported by this camera. Available values:");
+      GenApi::StringList_t entries;
+      node->GetSymbolics(entries);
+      for (const auto& entry : entries) {
+        log_warn(std::string("\t  - ") + entry.c_str());
+      }
+      return false;
+    }
+    Arena::SetNodeValue<GenICam::gcstring>(nodemap, node_name, value.c_str());
+    log_info(std::string("\t") + node_name + " set to " + value);
+    return true;
+  } catch (GenICam::GenericException& e) {
+    log_warn(std::string("\tFailed to set ") + node_name + ": " + e.what());
+    return false;
+  }
+}
+
 void ArenaCameraNode::set_nodes_()
 {
   // Load default profile. On reconnect after a crash the camera may still be
@@ -21,10 +49,8 @@ void ArenaCameraNode::set_nodes_()
   // Treat this as non-fatal — remaining set_nodes_* calls will still apply config.
   try {
     set_nodes_load_default_profile_();
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tCould not load default profile (camera may be in a bad state): ") + e.what());
   } catch (std::exception& e) {
-    log_warn(std::string("\tCould not load default profile: ") + e.what());
+    log_warn(std::string("\tCould not load default profile (camera may be in a bad state): ") + e.what());
   }
 
   // Explicitly set AcquisitionMode to "Continuous" regardless of the saved UserSet.
@@ -34,8 +60,6 @@ void ArenaCameraNode::set_nodes_()
     auto nodemap = m_pDevice->GetNodeMap();
     Arena::SetNodeValue<GenICam::gcstring>(nodemap, "AcquisitionMode", "Continuous");
     log_info("\tAcquisitionMode set to Continuous");
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tCould not set AcquisitionMode: ") + e.what());
   } catch (std::exception& e) {
     log_warn(std::string("\tCould not set AcquisitionMode: ") + e.what());
   }
@@ -62,8 +86,6 @@ void ArenaCameraNode::set_nodes_()
 
     Arena::SetNodeValue<bool>(pTLStreamNodeMap, "StreamAutoNegotiatePacketSize", true);
     Arena::SetNodeValue<bool>(pTLStreamNodeMap, "StreamPacketResendEnable", true);
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tStream configuration warning: ") + e.what());
   } catch (std::exception& e) {
     log_warn(std::string("\tStream configuration warning: ") + e.what());
   }
@@ -74,8 +96,6 @@ void ArenaCameraNode::set_nodes_()
     auto nodemap = m_pDevice->GetNodeMap();
     Arena::SetNodeValue<int64_t>(nodemap, "DeviceLinkThroughputReserve", 10);
     log_debug("\tDeviceLinkThroughputReserve set to 10%");
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tDeviceLinkThroughputReserve warning: ") + e.what());
   } catch (std::exception& e) {
     log_warn(std::string("\tDeviceLinkThroughputReserve warning: ") + e.what());
   }
@@ -90,8 +110,6 @@ void ArenaCameraNode::set_nodes_()
       log_info(std::string("\tDeviceStreamChannelPacketSize set to ") +
                std::to_string(maxPacketSize) + " bytes");
     }
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tPacket size configuration warning: ") + e.what());
   } catch (std::exception& e) {
     log_warn(std::string("\tPacket size configuration warning: ") + e.what());
   }
@@ -120,13 +138,9 @@ void ArenaCameraNode::set_nodes_()
 
     Arena::SetNodeValue<bool>(nodemap, "PtpEnable", true);
     log_info("\tPTP enabled — camera will sync to network master, never self-elect");
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tCould not enable PTP (camera may not support it): ") + e.what());
   } catch (std::exception& e) {
-    log_warn(std::string("\tCould not enable PTP: ") + e.what());
+    log_warn(std::string("\tCould not enable PTP (camera may not support it): ") + e.what());
   }
-
-  //set_nodes_test_pattern_image_();
 }
 
 void ArenaCameraNode::set_nodes_load_default_profile_()
@@ -144,53 +158,33 @@ void ArenaCameraNode::set_nodes_roi_()
 {
   auto nodemap = m_pDevice->GetNodeMap();
 
-  // Width -------------------------------------------------
-  if (is_passed_width) {
+  // Width and Height take identical treatment; increments are read per-axis.
+  auto set_dimension = [&](const char* name, size_t& value, bool is_passed) {
+    if (!is_passed) {
+      value = static_cast<size_t>(Arena::GetNodeValue<int64_t>(nodemap, name));
+      return;
+    }
+    GenApi::CIntegerPtr node = nodemap->GetNode(name);
+    if (!node || !GenApi::IsReadable(node) || !GenApi::IsWritable(node)) {
+      Arena::SetNodeValue<int64_t>(nodemap, name, static_cast<int64_t>(value));
+      return;
+    }
     // Align to camera increment (many cameras require multiples of 4, 8, or 16)
-    GenApi::CIntegerPtr pWidth = nodemap->GetNode("Width");
-    if (pWidth && GenApi::IsReadable(pWidth) && GenApi::IsWritable(pWidth)) {
-      int64_t min_val = pWidth->GetMin();
-      int64_t inc     = pWidth->GetInc();
-      int64_t max_val = pWidth->GetMax();
-      int64_t requested = static_cast<int64_t>(width_);
-      int64_t aligned = ((requested - min_val) / inc * inc) + min_val;
-      aligned = std::clamp(aligned, min_val, max_val);
-      if (aligned != requested) {
-        log_warn("\tWidth " + std::to_string(requested) + " adjusted to " +
-                 std::to_string(aligned) + " (increment=" + std::to_string(inc) + ")");
-        width_ = static_cast<size_t>(aligned);
-      }
-      pWidth->SetValue(aligned);
-    } else {
-      Arena::SetNodeValue<int64_t>(nodemap, "Width", static_cast<int64_t>(width_));
+    const int64_t min_val = node->GetMin();
+    const int64_t inc = node->GetInc();
+    const int64_t requested = static_cast<int64_t>(value);
+    const int64_t aligned = std::clamp(((requested - min_val) / inc * inc) + min_val,
+                                       min_val, node->GetMax());
+    if (aligned != requested) {
+      log_warn(std::string("\t") + name + " " + std::to_string(requested) + " adjusted to " +
+               std::to_string(aligned) + " (increment=" + std::to_string(inc) + ")");
+      value = static_cast<size_t>(aligned);
     }
-  } else {
-    width_ = Arena::GetNodeValue<int64_t>(nodemap, "Width");
-  }
+    node->SetValue(aligned);
+  };
 
-  // Height ------------------------------------------------
-  if (is_passed_height) {
-    // Align to camera increment
-    GenApi::CIntegerPtr pHeight = nodemap->GetNode("Height");
-    if (pHeight && GenApi::IsReadable(pHeight) && GenApi::IsWritable(pHeight)) {
-      int64_t min_val = pHeight->GetMin();
-      int64_t inc     = pHeight->GetInc();
-      int64_t max_val = pHeight->GetMax();
-      int64_t requested = static_cast<int64_t>(height_);
-      int64_t aligned = ((requested - min_val) / inc * inc) + min_val;
-      aligned = std::clamp(aligned, min_val, max_val);
-      if (aligned != requested) {
-        log_warn("\tHeight " + std::to_string(requested) + " adjusted to " +
-                 std::to_string(aligned) + " (increment=" + std::to_string(inc) + ")");
-        height_ = static_cast<size_t>(aligned);
-      }
-      pHeight->SetValue(aligned);
-    } else {
-      Arena::SetNodeValue<int64_t>(nodemap, "Height", static_cast<int64_t>(height_));
-    }
-  } else {
-    height_ = Arena::GetNodeValue<int64_t>(nodemap, "Height");
-  }
+  set_dimension("Width", width_, is_passed_width);
+  set_dimension("Height", height_, is_passed_height);
 
   log_info(std::string("\tROI set to ") + std::to_string(width_) + "X" +
            std::to_string(height_));
@@ -201,35 +195,12 @@ void ArenaCameraNode::set_nodes_gain_()
   auto nodemap = m_pDevice->GetNodeMap();
 
   if (is_passed_auto_gain_) {
-    try {
-      // Verify the node is writable and the value is valid
-      GenApi::CEnumerationPtr pGainAuto = nodemap->GetNode("GainAuto");
-      if (pGainAuto && GenApi::IsWritable(pGainAuto)) {
-        // Check if the requested value is available
-        if (pGainAuto->GetEntryByName(auto_gain_.c_str())) {
-          Arena::SetNodeValue<GenICam::gcstring>(nodemap, "GainAuto", auto_gain_.c_str());
-          log_info(std::string("\tGainAuto set to ") + auto_gain_);
-        } else {
-          log_warn(std::string("\tGainAuto value '") + auto_gain_ + "' not supported by this camera. Available values:");
-          GenApi::StringList_t entries;
-          pGainAuto->GetSymbolics(entries);
-          for (const auto& entry : entries) {
-            log_warn(std::string("\t  - ") + entry.c_str());
-          }
-          log_warn("\tSkipping GainAuto setting.");
-          return;
-        }
-      } else {
-        log_warn("\tGainAuto node not writable");
-        return;
-      }
-
-      if (auto_gain_ != "Off") {
-        return;  // auto gain enabled; skip manual gain
-      }
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set GainAuto: ") + e.what());
+    if (!set_enum_node_(nodemap, "GainAuto", auto_gain_)) {
+      log_warn("\tSkipping GainAuto setting.");
       return;
+    }
+    if (auto_gain_ != "Off") {
+      return;  // auto gain enabled; skip manual gain
     }
   }
 
@@ -323,67 +294,25 @@ void ArenaCameraNode::set_nodes_exposure_()
   // collapsed limits (e.g. upper == lower == sensor minimum).
   bool auto_exposure_set = false;
   if (is_passed_auto_exposure_) {
-    try {
-      GenApi::CEnumerationPtr pExposureAuto = nodemap->GetNode("ExposureAuto");
-      if (pExposureAuto && GenApi::IsWritable(pExposureAuto)) {
-        if (pExposureAuto->GetEntryByName(auto_exposure_.c_str())) {
-          Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureAuto", auto_exposure_.c_str());
-          log_info(std::string("\tExposureAuto set to ") + auto_exposure_);
-          auto_exposure_set = true;
-        } else {
-          log_warn(std::string("\tExposureAuto value '") + auto_exposure_ + "' not supported by this camera. Available values:");
-          GenApi::StringList_t entries;
-          pExposureAuto->GetSymbolics(entries);
-          for (const auto& entry : entries) {
-            log_warn(std::string("\t  - ") + entry.c_str());
-          }
-          log_warn("\tSkipping ExposureAuto setting. Other exposure parameters will still be applied.");
-        }
-      } else {
-        // Detailed diagnostic: why is the node not writable?
-        std::string reason = "ExposureAuto node not writable.";
+    auto_exposure_set = set_enum_node_(nodemap, "ExposureAuto", auto_exposure_);
+    if (!auto_exposure_set) {
+      // ExposureAuto is most often locked by ExposureMode or TriggerMode —
+      // report both so the cause is visible in one log line.
+      std::string ctx;
+      for (const char* n : {"ExposureMode", "TriggerMode"}) {
         try {
-          GenICam::gcstring currentVal = pExposureAuto
-              ? pExposureAuto->GetCurrentEntry()->GetSymbolic()
-              : "null";
-          reason += " Current value: " + std::string(currentVal.c_str()) + ".";
+          GenICam::gcstring v = Arena::GetNodeValue<GenICam::gcstring>(nodemap, n);
+          ctx += " " + std::string(n) + ": " + v.c_str() + ".";
         } catch (...) {}
-        try {
-          GenICam::gcstring mode = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "ExposureMode");
-          reason += " ExposureMode: " + std::string(mode.c_str()) + ".";
-        } catch (...) {}
-        try {
-          GenICam::gcstring trig = Arena::GetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode");
-          reason += " TriggerMode: " + std::string(trig.c_str()) + ".";
-        } catch (...) {}
-        log_warn(std::string("\t") + reason + " Other exposure parameters will still be applied.");
       }
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ExposureAuto: ") + e.what() + ". Other exposure parameters will still be applied.");
+      log_warn("\tOther exposure parameters will still be applied." + ctx);
     }
   }
 
   // --- Step 3: Fine-tune auto exposure parameters (now that ExposureAuto is set) ---
   if (is_passed_exposure_auto_algorithm_) {
-    try {
-      GenApi::CEnumerationPtr pAlgorithm = nodemap->GetNode("ExposureAutoAlgorithm");
-      if (pAlgorithm && GenApi::IsWritable(pAlgorithm)) {
-        if (pAlgorithm->GetEntryByName(exposure_auto_algorithm_.c_str())) {
-          Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureAutoAlgorithm", exposure_auto_algorithm_.c_str());
-          log_info(std::string("\tExposureAutoAlgorithm set to ") + exposure_auto_algorithm_);
-        } else {
-          log_warn(std::string("\tExposureAutoAlgorithm value '") + exposure_auto_algorithm_ + "' not supported. Available values:");
-          GenApi::StringList_t entries;
-          pAlgorithm->GetSymbolics(entries);
-          for (const auto& entry : entries) {
-            log_warn(std::string("\t  - ") + entry.c_str());
-          }
-        }
-      } else {
-        log_warn("\tExposureAutoAlgorithm node not writable (requires ExposureAuto = Continuous)");
-      }
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ExposureAutoAlgorithm: ") + e.what());
+    if (!set_enum_node_(nodemap, "ExposureAutoAlgorithm", exposure_auto_algorithm_)) {
+      log_warn("\t(ExposureAutoAlgorithm requires ExposureAuto = Continuous)");
     }
   }
 
@@ -407,26 +336,7 @@ void ArenaCameraNode::set_nodes_exposure_()
 
   // Set exposure limit control (set mode before explicit limits)
   if (is_passed_exposure_auto_limit_auto_) {
-    try {
-      GenApi::CEnumerationPtr pLimitAuto = nodemap->GetNode("ExposureAutoLimitAuto");
-      if (pLimitAuto && GenApi::IsWritable(pLimitAuto)) {
-        if (pLimitAuto->GetEntryByName(exposure_auto_limit_auto_.c_str())) {
-          Arena::SetNodeValue<GenICam::gcstring>(nodemap, "ExposureAutoLimitAuto", exposure_auto_limit_auto_.c_str());
-          log_info(std::string("\tExposureAutoLimitAuto set to ") + exposure_auto_limit_auto_);
-        } else {
-          log_warn(std::string("\tExposureAutoLimitAuto value '") + exposure_auto_limit_auto_ + "' not supported. Available values:");
-          GenApi::StringList_t entries;
-          pLimitAuto->GetSymbolics(entries);
-          for (const auto& entry : entries) {
-            log_warn(std::string("\t  - ") + entry.c_str());
-          }
-        }
-      } else {
-        log_warn("\tExposureAutoLimitAuto node not writable");
-      }
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ExposureAutoLimitAuto: ") + e.what());
-    }
+    set_enum_node_(nodemap, "ExposureAutoLimitAuto", exposure_auto_limit_auto_);
   }
 
   // Set manual exposure limits (only effective when ExposureAutoLimitAuto is "Off")
@@ -483,8 +393,6 @@ void ArenaCameraNode::set_nodes_frame_rate_()
       Arena::SetNodeValue<bool>(nodemap, "ShortExposureEnable", short_exposure_enable_);
       log_info(std::string("\tShortExposureEnable set to: ") +
                (short_exposure_enable_ ? "true" : "false"));
-    } catch (GenICam::GenericException& e) {
-      log_warn(std::string("\tFailed to set ShortExposureEnable: ") + e.what());
     } catch (std::exception& e) {
       log_warn(std::string("\tFailed to set ShortExposureEnable: ") + e.what());
     }
@@ -557,8 +465,6 @@ void ArenaCameraNode::set_nodes_frame_rate_()
     } else {
       log_info("\tFrame rate control enabled but no frame rate value specified. Using camera default.");
     }
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tFrame rate configuration warning: ") + e.what());
   } catch (std::exception& e) {
     log_warn(std::string("\tFrame rate configuration warning: ") + e.what());
   }
@@ -600,16 +506,8 @@ void ArenaCameraNode::set_nodes_trigger_mode_()
     else {
       Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TriggerMode", "Off");
     }
-  } catch (GenICam::GenericException& e) {
-    log_warn(std::string("\tTrigger mode configuration skipped: ") + e.what());
   } catch (std::exception& e) {
+    // GenICam::GenericException derives from std::exception — one handler covers both.
     log_warn(std::string("\tTrigger mode configuration skipped: ") + e.what());
   }
-}
-
-// just for debugging
-void ArenaCameraNode::set_nodes_test_pattern_image_()
-{
-  auto nodemap = m_pDevice->GetNodeMap();
-  Arena::SetNodeValue<GenICam::gcstring>(nodemap, "TestPattern", "Pattern3");
 }

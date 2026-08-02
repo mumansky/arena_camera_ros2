@@ -708,19 +708,8 @@ void ArenaCameraNode::run_()
       m_is_streaming_.store(true);
       log_debug("StartStream() completed");
       break;  // success
-    } catch (GenICam::GenericException& e) {
-      if (attempt < MAX_STREAM_START_ATTEMPTS) {
-        log_warn(std::string("StartStream attempt ") + std::to_string(attempt) +
-                 "/" + std::to_string(MAX_STREAM_START_ATTEMPTS) +
-                 " failed: " + e.what() + " — retrying in " +
-                 std::to_string(STREAM_RETRY_DELAY_MS) + "ms...");
-        std::this_thread::sleep_for(std::chrono::milliseconds(STREAM_RETRY_DELAY_MS));
-      } else {
-        log_err(std::string("Failed to start stream after ") +
-                std::to_string(MAX_STREAM_START_ATTEMPTS) + " attempts: " + e.what());
-        throw;
-      }
     } catch (std::exception& e) {
+      // GenICam::GenericException derives from std::exception — one handler covers both.
       if (attempt < MAX_STREAM_START_ATTEMPTS) {
         log_warn(std::string("StartStream attempt ") + std::to_string(attempt) +
                  "/" + std::to_string(MAX_STREAM_START_ATTEMPTS) +
@@ -871,6 +860,52 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
 
   cv::Mat dolp_u8, aolp_u8;
 
+  // Publish a mono8 result as raw + compressed. A null publisher means that
+  // output is disabled, so the null check is the only gate needed: raw
+  // publishers are only created when publish_raw_ (or, for DOLP/AoLP, when the
+  // output itself) is enabled, and compressed ones only when publish_compressed_.
+  auto publish_mono8 = [&](const cv::Mat& img,
+      const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr& raw_pub,
+      const rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr& cmp_pub) {
+    if (raw_pub) {
+      auto msg = std::make_unique<sensor_msgs::msg::Image>();
+      fill_header_(msg->header, pImage);
+      msg->height = static_cast<uint32_t>(img.rows);
+      msg->width  = static_cast<uint32_t>(img.cols);
+      msg->encoding = "mono8";
+      msg->is_bigendian = 0;
+      msg->step = static_cast<uint32_t>(img.cols);
+      msg->data.assign(img.data, img.data + img.total());
+      raw_pub->publish(std::move(msg));
+    }
+    if (cmp_pub) {
+      auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+      fill_header_(msg->header, pImage);
+      msg->format = "jpeg";
+      jpeg_encode_(img, msg->data);
+      cmp_pub->publish(std::move(msg));
+    }
+  };
+
+  // False-color AoLP: hue = polarization angle, saturation = DOLP, fixed value.
+  auto publish_aolp_color = [&](const cv::Mat& aolp, const cv::Mat& dolp) {
+    if (!publish_aolp_color_ || !m_pub_aolp_color_compressed_ ||
+        aolp.empty() || dolp.empty()) {
+      return;
+    }
+    cv::Mat hue;
+    aolp.convertTo(hue, CV_8U, 180.0 / 255.0);  // OpenCV hue range is [0,180]
+    cv::Mat hsv, bgr;
+    cv::merge(std::vector<cv::Mat>{hue, dolp,
+                                   cv::Mat(aolp.size(), CV_8U, cv::Scalar(200))}, hsv);
+    cv::cvtColor(hsv, bgr, cv::COLOR_HSV2BGR);
+    auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
+    fill_header_(msg->header, pImage);
+    msg->format = "jpeg";
+    jpeg_encode_(bgr, msg->data);
+    m_pub_aolp_color_compressed_->publish(std::move(msg));
+  };
+
 #ifdef HAS_POLAR_KERNEL
   // --- GPU fast path: fused Stokes + DOLP + AoLP in one CUDA kernel ---
   // Uses raw mono8 channel data directly — no BGR→gray conversion needed.
@@ -907,95 +942,24 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
     dtimer.mark("aolp");
 
     if (gpu_ok && publish_stokes_) {
-      // Helper lambda to publish one Stokes component as raw + compressed
-      auto pub_stokes = [&](cv::Mat& img,
-                            rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr& raw_pub,
-                            rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr& cmp_pub) {
-        if (publish_raw_ && raw_pub) {
-          auto msg = std::make_unique<sensor_msgs::msg::Image>();
-          fill_header_(msg->header, pImage);
-          msg->height = static_cast<uint32_t>(raw_h);
-          msg->width  = static_cast<uint32_t>(raw_w);
-          msg->encoding = "mono8"; msg->is_bigendian = 0;
-          msg->step = static_cast<uint32_t>(raw_w);
-          msg->data.assign(img.data, img.data + img.total());
-          raw_pub->publish(std::move(msg));
-        }
-        if (publish_compressed_ && cmp_pub) {
-          auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-          fill_header_(msg->header, pImage);
-          msg->format = "jpeg";
-          jpeg_encode_(img, msg->data);
-          cmp_pub->publish(std::move(msg));
-        }
-      };
-      pub_stokes(s0_u8, m_pub_stokes_s0_, m_pub_stokes_s0_compressed_);
-      pub_stokes(s1_u8, m_pub_stokes_s1_, m_pub_stokes_s1_compressed_);
-      pub_stokes(s2_u8, m_pub_stokes_s2_, m_pub_stokes_s2_compressed_);
+      publish_mono8(s0_u8, m_pub_stokes_s0_, m_pub_stokes_s0_compressed_);
+      publish_mono8(s1_u8, m_pub_stokes_s1_, m_pub_stokes_s1_compressed_);
+      publish_mono8(s2_u8, m_pub_stokes_s2_, m_pub_stokes_s2_compressed_);
       dtimer.mark("stokes_pub");
     }
   }
 
   if (gpu_ok) {
-    // Publish DOLP
     if (publish_dolp_ && m_pub_dolp_) {
       if (out_dolp) *out_dolp = dolp_u8.clone();
-      {
-        auto msg = std::make_unique<sensor_msgs::msg::Image>();
-        fill_header_(msg->header, pImage);
-        msg->height = stokes_h; msg->width = stokes_w;
-        msg->encoding = "mono8"; msg->is_bigendian = 0; msg->step = stokes_w;
-        msg->data.assign(dolp_u8.data, dolp_u8.data + dolp_u8.total());
-        m_pub_dolp_->publish(std::move(msg));
-      }
-      if (publish_compressed_ && m_pub_dolp_compressed_) {
-        auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-        fill_header_(msg->header, pImage);
-        msg->format = "jpeg";
-        jpeg_encode_(dolp_u8, msg->data);
-        m_pub_dolp_compressed_->publish(std::move(msg));
-      }
+      publish_mono8(dolp_u8, m_pub_dolp_, m_pub_dolp_compressed_);
     }
-    // Publish AoLP
     if (publish_aolp_ && m_pub_aolp_) {
       if (out_aolp) *out_aolp = aolp_u8.clone();
-      {
-        auto msg = std::make_unique<sensor_msgs::msg::Image>();
-        fill_header_(msg->header, pImage);
-        msg->height = stokes_h; msg->width = stokes_w;
-        msg->encoding = "mono8"; msg->is_bigendian = 0; msg->step = stokes_w;
-        msg->data.assign(aolp_u8.data, aolp_u8.data + aolp_u8.total());
-        m_pub_aolp_->publish(std::move(msg));
-      }
-      if (publish_compressed_ && m_pub_aolp_compressed_) {
-        auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-        fill_header_(msg->header, pImage);
-        msg->format = "jpeg";
-        jpeg_encode_(aolp_u8, msg->data);
-        m_pub_aolp_compressed_->publish(std::move(msg));
-      }
+      publish_mono8(aolp_u8, m_pub_aolp_, m_pub_aolp_compressed_);
     }
-    // Publish false-color AoLP (HSV: H=angle, S=DOLP, V=200)
-    if (publish_aolp_color_ && m_pub_aolp_color_compressed_ &&
-        !aolp_u8.empty() && !dolp_u8.empty()) {
-      cv::Mat hsv(raw_h, raw_w, CV_8UC3);
-      for (int i = 0; i < raw_h * raw_w; ++i) {
-        // H: AoLP [0,255] remapped to [0,180] (OpenCV hue range)
-        hsv.data[i * 3 + 0] = static_cast<uint8_t>(aolp_u8.data[i] * 180 / 255);
-        // S: DOLP directly [0,255]
-        hsv.data[i * 3 + 1] = dolp_u8.data[i];
-        // V: fixed brightness
-        hsv.data[i * 3 + 2] = 200;
-      }
-      cv::Mat bgr;
-      cv::cvtColor(hsv, bgr, cv::COLOR_HSV2BGR);
-      auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-      fill_header_(msg->header, pImage);
-      msg->format = "jpeg";
-      jpeg_encode_(bgr, msg->data);
-      m_pub_aolp_color_compressed_->publish(std::move(msg));
-      dtimer.mark("aolp_color");
-    }
+    publish_aolp_color(aolp_u8, dolp_u8);
+    dtimer.mark("aolp_color");
   } else {
 #else
   {
@@ -1039,21 +1003,7 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
       dolp_float.convertTo(dolp_u8, CV_8U, 255.0);
 
       if (out_dolp) *out_dolp = dolp_u8.clone();
-      {
-        auto msg = std::make_unique<sensor_msgs::msg::Image>();
-        fill_header_(msg->header, pImage);
-        msg->height = stokes_h; msg->width = stokes_w;
-        msg->encoding = "mono8"; msg->is_bigendian = 0; msg->step = stokes_w;
-        msg->data.assign(dolp_u8.data, dolp_u8.data + dolp_u8.total());
-        m_pub_dolp_->publish(std::move(msg));
-      }
-      if (publish_compressed_ && m_pub_dolp_compressed_) {
-        auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-        fill_header_(msg->header, pImage);
-        msg->format = "jpeg";
-        jpeg_encode_(dolp_u8, msg->data);
-        m_pub_dolp_compressed_->publish(std::move(msg));
-      }
+      publish_mono8(dolp_u8, m_pub_dolp_, m_pub_dolp_compressed_);
     }
     dtimer.mark("dolp");
 
@@ -1071,21 +1021,7 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
       phase_mat.convertTo(aolp_u8, CV_8U);
 
       if (out_aolp) *out_aolp = aolp_u8.clone();
-      {
-        auto msg = std::make_unique<sensor_msgs::msg::Image>();
-        fill_header_(msg->header, pImage);
-        msg->height = stokes_h; msg->width = stokes_w;
-        msg->encoding = "mono8"; msg->is_bigendian = 0; msg->step = stokes_w;
-        msg->data.assign(aolp_u8.data, aolp_u8.data + aolp_u8.total());
-        m_pub_aolp_->publish(std::move(msg));
-      }
-      if (publish_compressed_ && m_pub_aolp_compressed_) {
-        auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-        fill_header_(msg->header, pImage);
-        msg->format = "jpeg";
-        jpeg_encode_(aolp_u8, msg->data);
-        m_pub_aolp_compressed_->publish(std::move(msg));
-      }
+      publish_mono8(aolp_u8, m_pub_aolp_, m_pub_aolp_compressed_);
     }
     dtimer.mark("aolp");
 
@@ -1106,51 +1042,14 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
       cv::min(cv::max(s2_f, 0.0f), 255.0f, s2_f);
       cv::Mat s2_u8; s2_f.convertTo(s2_u8, CV_8U);
 
-      auto pub_stokes = [&](cv::Mat& img,
-                            rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr& raw_pub,
-                            rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr& cmp_pub) {
-        if (publish_raw_ && raw_pub) {
-          auto msg = std::make_unique<sensor_msgs::msg::Image>();
-          fill_header_(msg->header, pImage);
-          msg->height = static_cast<uint32_t>(stokes_h);
-          msg->width  = static_cast<uint32_t>(stokes_w);
-          msg->encoding = "mono8"; msg->is_bigendian = 0;
-          msg->step = static_cast<uint32_t>(stokes_w);
-          msg->data.assign(img.data, img.data + img.total());
-          raw_pub->publish(std::move(msg));
-        }
-        if (publish_compressed_ && cmp_pub) {
-          auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-          fill_header_(msg->header, pImage);
-          msg->format = "jpeg";
-          jpeg_encode_(img, msg->data);
-          cmp_pub->publish(std::move(msg));
-        }
-      };
-      pub_stokes(s0_u8, m_pub_stokes_s0_, m_pub_stokes_s0_compressed_);
-      pub_stokes(s1_u8, m_pub_stokes_s1_, m_pub_stokes_s1_compressed_);
-      pub_stokes(s2_u8, m_pub_stokes_s2_, m_pub_stokes_s2_compressed_);
+      publish_mono8(s0_u8, m_pub_stokes_s0_, m_pub_stokes_s0_compressed_);
+      publish_mono8(s1_u8, m_pub_stokes_s1_, m_pub_stokes_s1_compressed_);
+      publish_mono8(s2_u8, m_pub_stokes_s2_, m_pub_stokes_s2_compressed_);
       dtimer.mark("stokes_pub");
     }
 
-    // --- False-color AoLP (CPU path) ---
-    if (publish_aolp_color_ && m_pub_aolp_color_compressed_ &&
-        !aolp_u8.empty() && !dolp_u8.empty()) {
-      cv::Mat hsv(stokes_h, stokes_w, CV_8UC3);
-      for (int i = 0; i < static_cast<int>(stokes_h * stokes_w); ++i) {
-        hsv.data[i * 3 + 0] = static_cast<uint8_t>(aolp_u8.data[i] * 180 / 255);
-        hsv.data[i * 3 + 1] = dolp_u8.data[i];
-        hsv.data[i * 3 + 2] = 200;
-      }
-      cv::Mat bgr;
-      cv::cvtColor(hsv, bgr, cv::COLOR_HSV2BGR);
-      auto msg = std::make_unique<sensor_msgs::msg::CompressedImage>();
-      fill_header_(msg->header, pImage);
-      msg->format = "jpeg";
-      jpeg_encode_(bgr, msg->data);
-      m_pub_aolp_color_compressed_->publish(std::move(msg));
-      dtimer.mark("aolp_color");
-    }
+    publish_aolp_color(aolp_u8, dolp_u8);
+    dtimer.mark("aolp_color");
   }  // end CPU fallback
 
   // Log DOLP/AoLP profiling detail if enabled
@@ -1162,8 +1061,6 @@ void ArenaCameraNode::compute_and_publish_dolp_aolp_(
       log_info("[profiler] DOLP/AoLP avg over 30 frames (ms):" + dolp_acc.flush_summary());
     }
   }
-
-  // mono_for_stokes automatically cleaned up by RAII when going out of scope
 }
 
 
@@ -1365,7 +1262,7 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
           static StageAccumulator proc_acc;
           StageTimer ptimer(profile_processing_, &proc_acc);
 
-          arena_camera::ArenaImageVector channels(
+          auto channels = arena_camera::own_arena_images(
               Arena::ImageFactory::SplitChannels(pImage));
           ptimer.mark("split");
 
@@ -1380,8 +1277,8 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
             cv::Mat cached_bgr[4];
 
             // Raw mono8 pointers from SplitChannels — used by GPU kernel to skip BGR→gray.
-            // The ArenaImageVector 'channels' stays alive for the entire block, so these
-            // pointers remain valid until compute_and_publish_dolp_aolp_ returns.
+            // 'channels' stays alive for the entire block, so these pointers remain
+            // valid until compute_and_publish_dolp_aolp_ returns.
             const uint8_t* raw_ch[4] = {
               static_cast<const uint8_t*>(channels[0]->GetData()),
               static_cast<const uint8_t*>(channels[1]->GetData()),
@@ -1410,7 +1307,7 @@ void ArenaCameraNode::process_copied_image_(Arena::IImage* pImage)
             if (need_bgr) {
               for (const auto& info : channel_infos) {
                 arena_camera::ArenaImagePtr bgr_image(
-                    Arena::ImageFactory::Convert(channels[info.index], PFNC_BGR8));
+                    Arena::ImageFactory::Convert(channels[info.index].get(), PFNC_BGR8));
                 if (!validate_bgr8_format(bgr_image.get(), "polarization channel " + info.name)) {
                   continue;
                 }
