@@ -61,126 +61,20 @@ inline ArenaImagePtr make_arena_image_ptr(Arena::IImage* image) {
 }
 
 /**
- * @brief RAII wrapper for a vector of Arena::IImage pointers
- *
- * This class manages a vector of Arena::IImage pointers, ensuring all
- * images are properly destroyed when the container goes out of scope.
- * This is particularly useful for managing the output of
- * Arena::ImageFactory::SplitChannels which returns a vector of images.
+ * @brief Take ownership of a vector of raw images (e.g. from SplitChannels)
  *
  * Example usage:
  * @code
- *   std::vector<Arena::IImage*> raw_channels = Arena::ImageFactory::SplitChannels(pImage);
- *   ArenaImageVector channels(std::move(raw_channels));
- *   // Access channels with channels[0], channels[1], etc.
- *   // All channels are automatically destroyed when 'channels' goes out of scope
+ *   auto channels = own_arena_images(Arena::ImageFactory::SplitChannels(pImage));
+ *   // channels[0]->GetData(), channels.size(), ...
+ *   // All channels destroyed when 'channels' goes out of scope
  * @endcode
  */
-class ArenaImageVector {
- public:
-  /**
-   * @brief Construct an empty ArenaImageVector
-   */
-  ArenaImageVector() = default;
-
-  /**
-   * @brief Construct from a vector of raw image pointers (takes ownership)
-   * @param images Vector of raw Arena::IImage pointers
-   */
-  explicit ArenaImageVector(std::vector<Arena::IImage*>&& images)
-      : images_(std::move(images)) {}
-
-  /**
-   * @brief Destructor - destroys all owned images
-   */
-  ~ArenaImageVector() noexcept {
-    clear();
-  }
-
-  // Non-copyable
-  ArenaImageVector(const ArenaImageVector&) = delete;
-  ArenaImageVector& operator=(const ArenaImageVector&) = delete;
-
-  // Moveable
-  ArenaImageVector(ArenaImageVector&& other) noexcept
-      : images_(std::move(other.images_)) {
-    other.images_.clear();
-  }
-
-  ArenaImageVector& operator=(ArenaImageVector&& other) noexcept {
-    if (this != &other) {
-      clear();
-      images_ = std::move(other.images_);
-      other.images_.clear();
-    }
-    return *this;
-  }
-
-  /**
-   * @brief Add an image to the vector (takes ownership)
-   * @param image Raw pointer to an Arena::IImage
-   */
-  void push_back(Arena::IImage* image) {
-    images_.push_back(image);
-  }
-
-  /**
-   * @brief Access an image by index
-   * @param index Index of the image
-   * @return Pointer to the image (ownership retained by this container)
-   */
-  Arena::IImage* operator[](size_t index) const {
-    return images_[index];
-  }
-
-  /**
-   * @brief Get the number of images in the vector
-   * @return Number of images
-   */
-  size_t size() const noexcept {
-    return images_.size();
-  }
-
-  /**
-   * @brief Check if the vector is empty
-   * @return true if empty, false otherwise
-   */
-  bool empty() const noexcept {
-    return images_.empty();
-  }
-
-  /**
-   * @brief Clear all images and destroy them
-   */
-  void clear() noexcept {
-    for (auto* img : images_) {
-      if (img) {
-        try {
-          Arena::ImageFactory::Destroy(img);
-        } catch (...) {
-          // Suppress exceptions during cleanup
-        }
-      }
-    }
-    images_.clear();
-  }
-
-  /**
-   * @brief Get iterator to the beginning
-   * @return Iterator to the first element
-   */
-  auto begin() noexcept { return images_.begin(); }
-  auto begin() const noexcept { return images_.begin(); }
-
-  /**
-   * @brief Get iterator to the end
-   * @return Iterator past the last element
-   */
-  auto end() noexcept { return images_.end(); }
-  auto end() const noexcept { return images_.end(); }
-
- private:
-  std::vector<Arena::IImage*> images_;
-};
+inline std::vector<ArenaImagePtr> own_arena_images(std::vector<Arena::IImage*> images) {
+  std::vector<ArenaImagePtr> owned;
+  owned.reserve(images.size());
+  for (auto* img : images) owned.push_back(make_arena_image_ptr(img));
+  return owned;
+}
 
 }  // namespace arena_camera
