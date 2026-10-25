@@ -315,6 +315,15 @@ void ArenaCameraNode::parse_parameters_()
     currentParam = "gpu_acceleration";
     gpu_acceleration_ = config_string(m_config_params_, "gpu_acceleration", "auto");
 
+    currentParam = "jpeg_backend";
+    jpeg_backend_ = config_string(m_config_params_, "jpeg_backend", "auto");
+    if (jpeg_backend_ != "auto" && jpeg_backend_ != "nvjpg" && jpeg_backend_ != "nvjpeg" &&
+        jpeg_backend_ != "cpu") {
+      log_warn("Unknown jpeg_backend '" + jpeg_backend_ +
+               "' (expected auto|nvjpg|nvjpeg|cpu) — using \"auto\"");
+      jpeg_backend_ = "auto";
+    }
+
     // Watchdog settings (Task 20)
     currentParam = "watchdog_timeout_sec";
     watchdog_timeout_sec_ = config_double(m_config_params_, "watchdog_timeout_sec", 5.0);
@@ -573,21 +582,43 @@ void ArenaCameraNode::initialize_()
   m_diagnostic_updater_->add("Camera Status", this, &ArenaCameraNode::produce_diagnostics_);
 
   //
-  // GPU JPEG encoder (optional) --------------------------------------------
+  // JPEG encoder + CUDA polarization kernel (optional) ----------------------
   // Probed at runtime so a cpu-only x86 build still works without HAS_CUDA.
+  // jpeg_backend picks the encoder; gpu_acceleration only gates CUDA, so the
+  // CUDA kernel can run alongside the NVJPG engine. "auto" uses both when
+  // available: mono -> NVJPG, BGR -> CUDA nvJPEG (see jpeg_encode_).
   //
+  if (jpeg_backend_ == "nvjpg" || jpeg_backend_ == "auto") {
+    nvjpg_encoder_ =
+        std::make_unique<NvjpgEncoder>(jpeg_quality_, NvjpgEncoder::default_plugin_path());
+    if (nvjpg_encoder_->is_valid()) {
+      use_nvjpg_ = true;
+      jpeg_backend_active_ = "nvjpg";
+      log_info("NVJPG engine JPEG encoding enabled (fixed-function, GPU-free)");
+    } else if (jpeg_backend_ == "nvjpg") {
+      log_warn("jpeg_backend=nvjpg unavailable (" + nvjpg_encoder_->error() +
+               ") — falling back to cv::imencode");
+      nvjpg_encoder_.reset();
+    } else {
+      log_info("NVJPG engine not available (" + nvjpg_encoder_->error() + ")");
+      nvjpg_encoder_.reset();
+    }
+  }
 #ifdef HAS_CUDA
   if (gpu_acceleration_ != "cpu") {
     int device_count = 0;
     cudaError_t cuda_err = cudaGetDeviceCount(&device_count);
     if (cuda_err == cudaSuccess && device_count > 0) {
-      nvjpeg_encoder_ = std::make_unique<NvJpegEncoder>(jpeg_quality_);
-      if (nvjpeg_encoder_->is_valid()) {
-        use_gpu_jpeg_ = true;
-        log_info("nvJPEG hardware JPEG encoding enabled (GPU)");
-      } else {
-        nvjpeg_encoder_.reset();
-        log_warn("nvJPEG init failed — falling back to cv::imencode");
+      if (jpeg_backend_ == "auto" || jpeg_backend_ == "nvjpeg") {
+        nvjpeg_encoder_ = std::make_unique<NvJpegEncoder>(jpeg_quality_);
+        if (nvjpeg_encoder_->is_valid()) {
+          use_gpu_jpeg_ = true;
+          jpeg_backend_active_ = use_nvjpg_ ? "nvjpg(mono)+nvjpeg(bgr)" : "nvjpeg";
+          log_info("CUDA nvJPEG JPEG encoding enabled (GPU)");
+        } else {
+          nvjpeg_encoder_.reset();
+          log_warn("nvJPEG init failed — falling back to cv::imencode");
+        }
       }
 #ifdef HAS_POLAR_KERNEL
       // Polarization kernel buffers are allocated lazily on first frame;
@@ -596,14 +627,18 @@ void ArenaCameraNode::initialize_()
       log_info("CUDA polarization kernel enabled (fused Stokes+DOLP+AoLP)");
 #endif
     } else {
-      log_info("No CUDA device found — using software JPEG encoding + CPU polarization");
+      log_info("No CUDA device found — CPU polarization");
     }
   } else {
-    log_info("gpu_acceleration=cpu — using software JPEG encoding");
+    log_info("gpu_acceleration=cpu — CUDA disabled, CPU polarization");
   }
 #else
-  log_info("Built without CUDA — using software JPEG encoding");
+  log_info("Built without CUDA — CPU polarization");
 #endif
+  if (jpeg_backend_ == "nvjpeg" && !use_gpu_jpeg_) {
+    log_warn("jpeg_backend=nvjpeg unavailable (needs CUDA and gpu_acceleration != cpu)");
+  }
+  log_info("JPEG backend: " + jpeg_backend_active_ + " (jpeg_backend=" + jpeg_backend_ + ")");
 }
 
 void ArenaCameraNode::wait_for_device_timer_callback_()
@@ -742,15 +777,57 @@ void ArenaCameraNode::run_()
 }
 
 // ---------------------------------------------------------------------------
-// JPEG encode helper: uses nvJPEG hardware encoder when available, otherwise
-// falls back to cv::imencode. All 7 compressed-image publish sites call this.
+// JPEG encode helper: uses the encoder chosen by jpeg_backend, falling back to
+// cv::imencode per frame if it fails. All 7 compressed-image publish sites
+// call this. With both hardware encoders active ("auto"), mono goes to NVJPG
+// and BGR to CUDA nvJPEG: NVJPG only takes YCbCr 4:2:0, so BGR would need a
+// CPU colour conversion (~5 ms/frame) that nvJPEG does on the GPU.
 // ---------------------------------------------------------------------------
 void ArenaCameraNode::jpeg_encode_(const cv::Mat& img, std::vector<uint8_t>& out) {
+  const auto t0 = std::chrono::steady_clock::now();
+  int used = 2;  // index into jpeg_ms_*: 0 nvjpg, 1 nvjpeg, 2 cpu
+  if (use_nvjpg_ && (img.channels() == 1 || !use_gpu_jpeg_)) {
+    if (nvjpg_encoder_->encode(img, out)) {
+      used = 0;
+    } else if (!nvjpg_fallback_warned_) {
+      log_warn("NVJPG encode failed (" + nvjpg_encoder_->error() + ", " +
+               std::to_string(img.cols) + "x" + std::to_string(img.rows) +
+               ") — using fallback encoder for such frames");
+      nvjpg_fallback_warned_ = true;
+    }
+  }
 #ifdef HAS_CUDA
-  if (use_gpu_jpeg_ && nvjpeg_encoder_->encode(img, out)) return;
+  if (used == 2 && use_gpu_jpeg_ && nvjpeg_encoder_->encode(img, out)) used = 1;
 #endif
-  std::vector<int> enc_params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-  cv::imencode(".jpg", img, out, enc_params);
+  if (used == 2) {
+    std::vector<int> enc_params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
+    cv::imencode(".jpg", img, out, enc_params);
+  }
+
+  if (profile_processing_) {
+    const double ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    jpeg_ms_sum_[used] += ms;
+    jpeg_ms_max_[used] = std::max(jpeg_ms_max_[used], ms);
+    ++jpeg_count_[used];
+    if (++jpeg_total_ >= 300) {
+      static const char* const kNames[3] = {"nvjpg", "nvjpeg", "cpu"};
+      std::string msg = "[profiler] JPEG avg over " + std::to_string(jpeg_total_) +
+                        " encodes (ms, by encoder):";
+      for (int i = 0; i < 3; ++i) {
+        if (jpeg_count_[i] == 0) continue;
+        char part[96];
+        std::snprintf(part, sizeof(part), " %s n=%d mean=%.2f max=%.2f", kNames[i],
+                      jpeg_count_[i], jpeg_ms_sum_[i] / jpeg_count_[i], jpeg_ms_max_[i]);
+        msg += part;
+        jpeg_ms_sum_[i] = 0.0;
+        jpeg_ms_max_[i] = 0.0;
+        jpeg_count_[i] = 0;
+      }
+      log_info(msg);
+      jpeg_total_ = 0;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

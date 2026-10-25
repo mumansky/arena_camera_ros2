@@ -157,6 +157,7 @@ Latency values are logged at DEBUG level and exposed in `/diagnostics`.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `gpu_acceleration` | string | `"auto"` | `"auto"` — use nvJPEG + CUDA kernel if available; `"gpu"` — force GPU; `"cpu"` — always use software path |
+| `jpeg_backend` | string | `"auto"` | JPEG encoder for `/compressed` topics: `"auto"` — mono on the NVJPG engine, BGR on CUDA nvJPEG (whichever is available, else CPU); `"nvjpg"` — everything on the Orin NVJPG engine (least GPU); `"nvjpeg"` — CUDA nvJPEG; `"cpu"` — `cv::imencode` |
 
 ### Profiling & Debug
 
@@ -278,6 +279,49 @@ When `HAS_CUDA` is defined at build time and a CUDA device is available at runti
 - **Fused CUDA kernel** (`polar_kernel`) computes Stokes parameters, DOLP, AoLP, and (optionally) S0/S1/S2 outputs in a single GPU pass, replacing ~60 ms of CPU work per frame.
 
 Set `gpu_acceleration: "cpu"` to force the software path for benchmarking comparisons.
+
+### NVJPG engine
+
+The Orin also has dedicated JPEG hardware (NVJPG) separate from the GPU. By
+default (`jpeg_backend: "auto"`) mono topics (DOLP, AoLP, polarization
+channels) are encoded there and BGR topics on CUDA nvJPEG: NVJPG only accepts
+YCbCr 4:2:0, so BGR would need a CPU colour conversion that nvJPEG does on the
+GPU. `jpeg_backend: "nvjpg"` sends everything to NVJPG to minimise GPU use.
+
+Measured on an Orin NX 8GB, PHX050S1-Q at 10 FPS:
+
+| `jpeg_backend` | JPEG encode (mean) | GPU load | Processing / frame |
+|---|---|---|---|
+| `auto` (default) | mono 2.8 ms (NVJPG), BGR 5.1 ms (nvJPEG) | 9.5 % | 72.6 ms |
+| `nvjpeg` (CUDA) | 3.9–4.1 ms | 12.6 % | 69.8–73.6 ms |
+| `nvjpg` | 3.7 ms | 4.1 % | 67.4 ms (BGR stage +5.5 ms) |
+| `cpu` | 8.7 ms | 2.4 % | 78.0 ms |
+
+GPU load is the `tegrastats` GR3D average over ~11 s; the remaining load with
+NVJPG is the CUDA polarization kernel. Open question: with NVJPG active the
+CPU-bound `pol_max` work (`cv::max`, raw copy) runs ~3 ms slower while other
+stages speed up, leaving the frame total unchanged. An isolated repro shows
+only ~0.5 ms (+20%) when encodes are interleaved, consistent with cache
+pollution from the NvBufSurface copy and cache flush.
+
+NVJPG needs the Jetson Multimedia API at build time:
+
+```bash
+sudo apt install nvidia-l4t-jetson-multimedia-api
+```
+
+CMake then builds `libarena_nvjpg.so`, which the node loads at runtime. L4T's
+`libnvjpeg.so` exports the full libjpeg API without symbol versions, so it is
+kept in this separate plugin (loaded with `RTLD_LOCAL | RTLD_DEEPBIND`) rather
+than linked into the node, where it would clash with OpenCV's `libjpeg.so.8`.
+
+Notes:
+- Mono images are encoded as YUV 4:2:0 with neutral chroma (the engine has no
+  grayscale mode). They display identically; consumers that need a 1-channel
+  `cv::Mat` should decode with `cv::IMREAD_GRAYSCALE`.
+- Width and height must be even; other frames fall back to `cv::imencode`.
+- With `profile_processing: true` the node logs average/max JPEG encode time
+  per backend every 300 encodes, and `/diagnostics` reports `JPEG Backend`.
 
 ## Diagnostics
 

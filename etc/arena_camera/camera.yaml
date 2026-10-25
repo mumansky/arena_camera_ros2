@@ -201,6 +201,21 @@
     # "cpu":  always use cv::imencode (useful for profiling comparisons)
     gpu_acceleration: "auto"
 
+    # JPEG Backend
+    # ------------
+    # Which encoder produces the /compressed topics. Independent of
+    # gpu_acceleration, so the CUDA polarization kernel can run alongside NVJPG.
+    # "auto" (default): mono images on the NVJPG engine, BGR on CUDA nvJPEG
+    #           (fastest mix on Orin); uses whichever is available, else CPU
+    # "nvjpg":  everything on Orin's fixed-function NVJPG engine — least GPU
+    #           use, but BGR needs a CPU colour conversion (~5 ms/frame).
+    #           Needs libarena_nvjpg.so (built when the Jetson Multimedia API
+    #           is installed). Mono images come out as 3-component JPEGs with
+    #           neutral chroma. Falls back to cv::imencode if unavailable.
+    # "nvjpeg": CUDA nvJPEG on the GPU (needs gpu_acceleration != "cpu")
+    # "cpu":    always cv::imencode
+    jpeg_backend: "auto"
+
     # Camera Auto-Reconnection
     # -------------------------
     # When the watchdog detects a frozen camera, automatically attempt to reconnect.

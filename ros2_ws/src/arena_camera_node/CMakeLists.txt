@@ -130,6 +130,7 @@ add_executable(${target_name}
     src/light_arena/deviceinfo_helper.cpp
     src/rclcpp_adapter/pixelformat_translation.cpp
     src/rclcpp_adapter/quality_of_service_translation.cpp
+    src/nvjpg_encoder.cpp
 )
 
 target_include_directories(${target_name}
@@ -250,9 +251,71 @@ else()
   endif()
 endif()
 
+# NvjpgEncoder loads the plugin below with dlopen() at runtime.
+target_link_libraries(${target_name} ${CMAKE_DL_LIBS})
+
+# -----------------------------------------------------------------------------
+# Optional: NVJPG hardware JPEG plugin (libarena_nvjpg.so) — Jetson only
+# Encodes on the Orin's fixed-function JPEG engine instead of the GPU.
+# Needs the Jetson Multimedia API headers and L4T's libnvjpeg.so:
+#   sudo apt install nvidia-l4t-jetson-multimedia-api
+# L4T's libnvjpeg.so shares its file name with CUDA's nvJPEG and exports the
+# whole libjpeg API, so it is isolated in a MODULE library that the node
+# dlopen()s with RTLD_LOCAL | RTLD_DEEPBIND (see src/nvjpg/nvjpg_plugin_api.h).
+# -----------------------------------------------------------------------------
+set(JETSON_MMAPI_DIR "/usr/src/jetson_multimedia_api" CACHE PATH "Jetson Multimedia API root")
+set(L4T_LIB_DIR "/usr/lib/aarch64-linux-gnu/nvidia" CACHE PATH "L4T NVIDIA library directory")
+unset(L4T_NVJPEG_LIB CACHE)
+unset(L4T_NVBUFSURFACE_LIB CACHE)
+# NO_DEFAULT_PATH: never pick up CUDA's libnvjpeg.so by accident.
+find_library(L4T_NVJPEG_LIB NAMES libnvjpeg.so PATHS ${L4T_LIB_DIR} NO_DEFAULT_PATH)
+find_library(L4T_NVBUFSURFACE_LIB NAMES nvbufsurface PATHS ${L4T_LIB_DIR} NO_DEFAULT_PATH)
+
+if(EXISTS "${JETSON_MMAPI_DIR}/include/NvJpegEncoder.h" AND L4T_NVJPEG_LIB AND L4T_NVBUFSURFACE_LIB)
+  message(STATUS "NVJPG hardware JPEG plugin enabled")
+  message(STATUS "  multimedia api : ${JETSON_MMAPI_DIR}")
+  message(STATUS "  libnvjpeg (L4T): ${L4T_NVJPEG_LIB}")
+  set(_mmapi_classes "${JETSON_MMAPI_DIR}/samples/common/classes")
+  add_library(arena_nvjpg MODULE
+    src/nvjpg/nvjpg_plugin.cpp
+    ${_mmapi_classes}/NvJpegEncoder.cpp
+    ${_mmapi_classes}/NvElement.cpp
+    ${_mmapi_classes}/NvElementProfiler.cpp
+    ${_mmapi_classes}/NvLogging.cpp
+    ${_mmapi_classes}/NvBuffer.cpp
+  )
+  # The MMAPI jpeglib.h must win over the system one inside the plugin only.
+  target_include_directories(arena_nvjpg PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/nvjpg
+  )
+  target_include_directories(arena_nvjpg SYSTEM PRIVATE
+    ${JETSON_MMAPI_DIR}/include
+    ${JETSON_MMAPI_DIR}/include/libjpeg-8b
+  )
+  target_compile_definitions(arena_nvjpg PRIVATE TEGRA_ACCELERATE)
+  target_compile_features(arena_nvjpg PRIVATE cxx_std_17)
+  set_target_properties(arena_nvjpg PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+  )
+  target_link_libraries(arena_nvjpg PRIVATE ${L4T_NVJPEG_LIB} ${L4T_NVBUFSURFACE_LIB} pthread)
+  # DT_RPATH (not RUNPATH) is searched before LD_LIBRARY_PATH, so a CUDA lib
+  # dir on LD_LIBRARY_PATH can't substitute CUDA's libnvjpeg.so for L4T's.
+  target_link_options(arena_nvjpg PRIVATE
+    "LINKER:--disable-new-dtags"
+    "LINKER:-rpath,${L4T_LIB_DIR}"
+  )
+  install(TARGETS arena_nvjpg DESTINATION lib/${PROJECT_NAME})
+else()
+  message(STATUS "NVJPG plugin not built — jpeg_backend: nvjpg unavailable")
+  if(NOT EXISTS "${JETSON_MMAPI_DIR}/include/NvJpegEncoder.h")
+    message(STATUS "  missing: Jetson Multimedia API  →  sudo apt install nvidia-l4t-jetson-multimedia-api")
+  endif()
+endif()
+
 # MV EXEC to lib dir
 install(TARGETS
-  ${target_name} 
+  ${target_name}
     DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -361,6 +424,22 @@ if(BUILD_TESTING)
     ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
   target_link_libraries(test_config_helpers yaml-cpp)
+
+  # NVJPG plugin tests — also check that OpenCV's libjpeg still works in the
+  # same process once the plugin is loaded (symbol isolation).
+  ament_add_gtest(test_nvjpg_encoder
+    test/test_nvjpg_encoder.cpp
+    src/nvjpg_encoder.cpp
+  )
+  target_include_directories(test_nvjpg_encoder PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(test_nvjpg_encoder ${OpenCV_LIBS} ${CMAKE_DL_LIBS})
+  if(TARGET arena_nvjpg)
+    add_dependencies(test_nvjpg_encoder arena_nvjpg)
+    target_compile_definitions(test_nvjpg_encoder PRIVATE
+      NVJPG_PLUGIN_PATH="$<TARGET_FILE:arena_nvjpg>")
+  endif()
 endif()
 
 ament_package()
