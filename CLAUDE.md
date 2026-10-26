@@ -30,7 +30,7 @@ ros2 run arena_camera_node start --ros-args --params-file etc/arena_camera/camer
 ros2 run arena_camera_node trigger_image
 ```
 
-Three GTest suites: `test_pixelformat_translation`, `test_qos_translation`, `test_config_helpers`.
+Four GTest suites: `test_pixelformat_translation`, `test_qos_translation`, `test_config_helpers`, `test_nvjpg_encoder` (skips itself where the NVJPG plugin or engine is unavailable).
 
 ## Code Conventions
 - **Formatting**: `clang-format` with `.clang-format` at repo root (Google style, 2-space indent). Run `clang-format -i <file>` before committing.
@@ -51,6 +51,8 @@ Three GTest suites: `test_pixelformat_translation`, `test_qos_translation`, `tes
 | `ros2_ws/src/arena_camera_node/src/config_helpers.h` | Inline YAML config reader helpers |
 | `ros2_ws/src/arena_camera_node/src/pixel_format_helpers.h` | PFNC constants and format detection/naming |
 | `ros2_ws/src/arena_camera_node/src/rclcpp_adapter/` | Pixel-format & QoS translation maps |
+| `ros2_ws/src/arena_camera_node/src/nvjpg_encoder.{h,cpp}` | NVJPG engine JPEG encoder; dlopen()s the plugin below |
+| `ros2_ws/src/arena_camera_node/src/nvjpg/` | `libarena_nvjpg.so` plugin (Jetson Multimedia API). Keep L4T `libnvjpeg` out of the node binary — it clashes with OpenCV's libjpeg |
 | `ros2_ws/src/arena_camera_node/src/light_arena/` | Device info helpers |
 | `etc/arena_camera/camera.yaml` | All runtime parameters (single source of truth) |
 | `ros2_ws/src/arena_camera_node/CMakeLists.txt` | Build config — do not move `cmake/` helper |

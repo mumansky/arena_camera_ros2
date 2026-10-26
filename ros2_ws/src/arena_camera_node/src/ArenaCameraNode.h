@@ -37,6 +37,9 @@
 // OpenCV (for cv::Mat in compute_and_publish_dolp_aolp_ signature)
 #include <opencv2/core.hpp>
 
+// NVJPG engine encoder: loads its plugin at runtime, so it builds everywhere.
+#include "nvjpg_encoder.h"
+
 // Optional CUDA extensions (Orin/Jetson; no-op on x86 without CUDA)
 #ifdef HAS_CUDA
 #include "nvjpeg_encoder.h"
@@ -375,6 +378,17 @@ class ArenaCameraNode : public rclcpp::Node
   std::string gpu_acceleration_;  // "auto" | "gpu" | "cpu" (from camera.yaml)
   bool use_gpu_jpeg_{false};      // Runtime: true when nvJPEG encoder is active
   bool use_gpu_polar_{false};     // Runtime: true when CUDA polarization kernel is active
+  std::string jpeg_backend_;      // "auto" | "nvjpg" | "nvjpeg" | "cpu" (from camera.yaml)
+  std::string jpeg_backend_active_{"cpu"};  // Encoder actually in use (set once at startup)
+  bool use_nvjpg_{false};         // Runtime: true when the NVJPG engine encoder is active
+  bool nvjpg_fallback_warned_{false};
+  std::unique_ptr<NvjpgEncoder> nvjpg_encoder_;
+  // JPEG timing for profile_processing, per encoder that handled the frame:
+  // [0] nvjpg, [1] nvjpeg, [2] cpu (worker thread only).
+  double jpeg_ms_sum_[3]{};
+  double jpeg_ms_max_[3]{};
+  int jpeg_count_[3]{};
+  int jpeg_total_{0};
 #ifdef HAS_CUDA
   std::unique_ptr<NvJpegEncoder> nvjpeg_encoder_;
 #endif

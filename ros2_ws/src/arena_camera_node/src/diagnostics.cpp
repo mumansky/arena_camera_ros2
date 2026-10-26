@@ -97,6 +97,7 @@ void ArenaCameraNode::produce_diagnostics_(diagnostic_updater::DiagnosticStatusW
   stat.add("Calculated FPS", std::to_string(calculated_fps));
   stat.add("Trigger Mode", trigger_mode_activated_ ? "enabled" : "disabled");
   stat.add("Topic", topic_);
+  stat.add("JPEG Backend", jpeg_backend_active_);
 
   // Backpressure metrics
   stat.add("Backpressure Events", std::to_string(backpressure_events));
